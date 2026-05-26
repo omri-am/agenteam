@@ -63,38 +63,6 @@ class TestBootstrap:
         assert str(project / "workspace") in p.stdout
 
 
-class TestInit:
-    def test_init_scaffolds_clean_project_templates(self, tmp_path: Path) -> None:
-        target = tmp_path / "my-startup"
-        env = os.environ.copy()
-        env.pop("AGENTEAM_ROOT", None)
-        project_src = Path(__file__).resolve().parents[1] / "src"
-        env["PYTHONPATH"] = str(project_src) + os.pathsep + env.get("PYTHONPATH", "")
-
-        p = subprocess.run(
-            [sys.executable, "-m", "agenteam.cli", "init", "my-startup"],
-            cwd=str(tmp_path),
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-
-        assert p.returncode == 0, p.stderr
-        assert (target / "AGENTS.md").is_file()
-        assert (target / ".claude" / "agents" / "ceo.md").is_file()
-        assert (target / ".claude" / "agents" / "cpo.md").is_file()
-        assert (target / ".claude" / "agents" / "cto.md").is_file()
-        assert (target / ".claude" / "agents" / "cdo.md").is_file()
-        assert (target / ".claude" / "agents" / "cco.md").is_file()
-        assert (target / "sprints" / "sprint-1.md").is_file()
-        assert not (target / "src").exists()
-        assert not (target / "state").exists()
-        assert not (target / "workspace").exists()
-        assert "Successfully initialized" in p.stdout
-        assert f"cd {target}" in p.stdout
-        assert "agenteam bootstrap" in p.stdout
-
-
 class TestSprintCommands:
     def test_show_emits_valid_json(self, cli) -> None:
         out = cli("sprint", "show", "s").stdout
@@ -255,3 +223,171 @@ class TestMidDebatePR:
         assert len(after["schedule"]) == initial_len + 4
         tail_targets = {t["target_pr_id"] for t in after["schedule"][initial_len:]}
         assert tail_targets == {pr_c}
+
+
+def _agenteam_env(extra_root: Path | None = None) -> dict[str, str]:
+    """Env block that points the CLI's import path at the in-tree ``src/``.
+
+    ``init`` writes to an arbitrary target directory, not ``AGENTEAM_ROOT``, so
+    a stray ``AGENTEAM_ROOT`` inherited from the parent shell is stripped to
+    prevent test flakiness. ``extra_root`` re-introduces it for the
+    ``chief customize`` tests that need a fixed project root.
+    """
+    env = os.environ.copy()
+    env.pop("AGENTEAM_ROOT", None)
+    project_src = Path(__file__).resolve().parents[1] / "src"
+    env["PYTHONPATH"] = str(project_src) + os.pathsep + env.get("PYTHONPATH", "")
+    if extra_root is not None:
+        env["AGENTEAM_ROOT"] = str(extra_root)
+    return env
+
+
+def _run(args: list[str], cwd: Path, env: dict[str, str], stdin: str | None = None
+         ) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "agenteam.cli", *args],
+        cwd=str(cwd),
+        env=env,
+        capture_output=True,
+        text=True,
+        input=stdin,
+    )
+
+
+class TestInit:
+    """`agenteam init <name> --idea "<text>"` scaffolds a new project."""
+
+    def test_idea_flag_substitutes_tokens(self, tmp_path: Path) -> None:
+        env = _agenteam_env()
+        p = _run(
+            ["init", "fintech-app", "--idea", "Trading platform for retail investors"],
+            cwd=tmp_path,
+            env=env,
+        )
+        assert p.returncode == 0, p.stderr
+
+        target = tmp_path / "fintech-app"
+        assert target.is_dir()
+        assert (target / "AGENTS.md").is_file()
+        sprint = (target / "sprints" / "sprint-1.md").read_text()
+        assert "{{CORE_PRODUCT_IDEA}}" not in sprint
+        assert "Trading platform for retail investors" in sprint
+
+        for role in ("ceo", "cpo", "cto", "cdo", "cco"):
+            agent = (target / ".claude" / "agents" / f"{role}.md").read_text()
+            assert "{{COMPANY_MISSION}}" not in agent
+            assert "Trading platform for retail investors" in agent
+            # File is structurally valid: frontmatter + heading preserved.
+            assert agent.startswith("---\n")
+            assert "## Operational Biases" in agent
+
+        # init must not pollute the target with runtime/state directories.
+        assert not (target / "state").exists()
+        assert not (target / "workspace").exists()
+
+        # Friendly next-steps message lands on stdout.
+        assert "Successfully initialized" in p.stdout
+        assert f"cd {target}" in p.stdout
+        assert "agenteam bootstrap" in p.stdout
+
+    def test_interactive_prompt_fallback(self, tmp_path: Path) -> None:
+        """No --idea flag triggers a typer.prompt; stdin satisfies it."""
+        env = _agenteam_env()
+        p = _run(
+            ["init", "indie-game"],
+            cwd=tmp_path,
+            env=env,
+            stdin="Roguelike with procedural narrative\n",
+        )
+        assert p.returncode == 0, p.stderr
+        sprint = (tmp_path / "indie-game" / "sprints" / "sprint-1.md").read_text()
+        assert "Roguelike with procedural narrative" in sprint
+
+    def test_init_refuses_to_overwrite_non_empty_dir(self, tmp_path: Path) -> None:
+        env = _agenteam_env()
+        _run(["init", "x", "--idea", "first run"], cwd=tmp_path, env=env)
+        p = _run(["init", "x", "--idea", "second run"], cwd=tmp_path, env=env)
+        assert p.returncode == 1
+        assert "not empty" in p.stderr
+
+    def test_init_accepts_absolute_path(self, tmp_path: Path) -> None:
+        env = _agenteam_env()
+        target = tmp_path / "nested" / "app"
+        p = _run(
+            ["init", str(target), "--idea", "Pet teleporter"],
+            cwd=tmp_path,
+            env=env,
+        )
+        assert p.returncode == 0, p.stderr
+        assert (target / "sprints" / "sprint-1.md").exists()
+
+
+class TestChiefCustomize:
+    """`agenteam chief customize <role> --focus "<text>"`."""
+
+    def _scaffold(self, tmp_path: Path, env: dict[str, str]) -> Path:
+        p = _run(
+            ["init", "co", "--idea", "Sourdough subscription network"],
+            cwd=tmp_path,
+            env=env,
+        )
+        assert p.returncode == 0, p.stderr
+        return tmp_path / "co"
+
+    def test_append_bias_to_cto(self, tmp_path: Path) -> None:
+        env = _agenteam_env()
+        project = self._scaffold(tmp_path, env)
+        env_with_root = _agenteam_env(extra_root=project)
+
+        focus = "Rust backend with high throughput"
+        p = _run(
+            ["chief", "customize", "cto", "--focus", focus],
+            cwd=project,
+            env=env_with_root,
+        )
+        assert p.returncode == 0, p.stderr
+
+        body = (project / ".claude" / "agents" / "cto.md").read_text()
+        assert focus in body
+        # Bullet sits inside the Operational Biases section (before the next
+        # `## ` heading — which in the CTO template is `## Deliverables`).
+        biases = body.split("## Operational Biases", 1)[1].split("## Deliverables", 1)[0]
+        assert focus in biases
+        # Pre-existing biases stay put.
+        assert "Pick load-bearing dependencies once" in biases
+        assert "Single regional deployment" in biases
+
+    def test_unknown_role_rejected(self, tmp_path: Path) -> None:
+        env = _agenteam_env()
+        project = self._scaffold(tmp_path, env)
+        env_with_root = _agenteam_env(extra_root=project)
+        p = _run(
+            ["chief", "customize", "cfo", "--focus", "irrelevant"],
+            cwd=project,
+            env=env_with_root,
+        )
+        assert p.returncode == 1
+        assert "unknown role" in p.stderr
+
+    def test_missing_agent_file_rejected(self, tmp_path: Path) -> None:
+        """Running outside an initialised project (no .claude/agents/) fails clean."""
+        env_with_root = _agenteam_env(extra_root=tmp_path)
+        p = _run(
+            ["chief", "customize", "cto", "--focus", "anything"],
+            cwd=tmp_path,
+            env=env_with_root,
+        )
+        assert p.returncode == 1
+        assert "agent file not found" in p.stderr
+
+    def test_role_argument_is_case_insensitive(self, tmp_path: Path) -> None:
+        env = _agenteam_env()
+        project = self._scaffold(tmp_path, env)
+        env_with_root = _agenteam_env(extra_root=project)
+        p = _run(
+            ["chief", "customize", "CTO", "--focus", "GPU inference path"],
+            cwd=project,
+            env=env_with_root,
+        )
+        assert p.returncode == 0, p.stderr
+        assert "GPU inference path" in (project / ".claude" / "agents" / "cto.md").read_text()

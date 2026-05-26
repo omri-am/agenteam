@@ -8,6 +8,9 @@ approval_quorum: 2
 ---
 # Sprint 1: Core MVP Definition
 
+## Core Product Idea
+{{CORE_PRODUCT_IDEA}}
+
 Founding sprint. All four spoke roles draft their domain's view of the
 baseline cross-functional product roadmap on parallel feature branches,
 then critique each other across two debate rounds. The CEO records the
@@ -15,7 +18,7 @@ final ADR after the human gate, and then authors the blueprint for the
 next sprint from the open questions left in the debate.
 
 ## Product Context
-We are defining the v1 of a generic software product. Each spoke
+We are defining the v1 of the product described above. Each spoke
 brings its domain to the table:
 
 1. The CPO frames the user problem, the personas, the jobs-to-be-done,

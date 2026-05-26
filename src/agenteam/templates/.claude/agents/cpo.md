@@ -27,6 +27,9 @@ success. Every other spoke's deliverable should be traceable back to
 your problem statement, and your PRD must take the operational and
 risk surface seriously rather than designing around it.
 
+## Company Mission
+{{COMPANY_MISSION}}
+
 ## Operational Biases
 - User outcomes over feature counts. A shipped MVP that proves the
   core JTBD with a focused user segment beats a complete-on-paper

@@ -83,12 +83,25 @@ sprint_app = typer.Typer(help="Inspect sprint definitions.", no_args_is_help=Tru
 debate_app = typer.Typer(help="Drive the turn-based debate.", no_args_is_help=True)
 adr_app = typer.Typer(help="Decision-record operations.", no_args_is_help=True)
 state_app = typer.Typer(help="State-store maintenance.", no_args_is_help=True)
+chief_app = typer.Typer(
+    help="Customize executive personas without opening files.",
+    no_args_is_help=True,
+)
 
 app.add_typer(pr_app, name="pr")
 app.add_typer(sprint_app, name="sprint")
 app.add_typer(debate_app, name="debate")
 app.add_typer(adr_app, name="adr")
 app.add_typer(state_app, name="state")
+app.add_typer(chief_app, name="chief")
+
+
+# ---------------------------------------------------------------------------
+# Scaffolding constants
+# ---------------------------------------------------------------------------
+
+
+CHIEF_ROLES = ("ceo", "cpo", "cto", "cdo", "cco")
 
 
 # ---------------------------------------------------------------------------
@@ -138,21 +151,35 @@ def _resource_templates_root() -> Traversable:
 def _copy_resource_tree(
     source: Traversable,
     destination: Path,
+    *,
+    idea: Optional[str] = None,
 ) -> None:
     """Copy an importlib.resources tree to a real filesystem path.
 
     ``Traversable`` resources may come from an editable source tree, a normal
     site-packages directory, or a zip-style importer. Reading bytes through the
     resource API keeps ``init`` independent of where Python installed us.
+
+    When ``idea`` is supplied, UTF-8-decodable files have their templated
+    tokens substituted in-flight; binary files are copied unchanged.
     """
     if source.is_dir():
         destination.mkdir(parents=True, exist_ok=True)
         for child in sorted(source.iterdir(), key=lambda p: p.name):
-            _copy_resource_tree(child, destination / child.name)
+            _copy_resource_tree(child, destination / child.name, idea=idea)
         return
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(source.read_bytes())
+    raw = source.read_bytes()
+    if idea is None:
+        destination.write_bytes(raw)
+        return
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        destination.write_bytes(raw)
+        return
+    destination.write_text(_substitute_tokens(text, idea), encoding="utf-8")
 
 
 def _resolve_target_dir(target_dir: Path) -> Path:
@@ -243,8 +270,22 @@ def init(
         ...,
         help="Directory to create for a new isolated agenteam project.",
     ),
+    idea: Optional[str] = typer.Option(
+        None,
+        "--idea",
+        help="Startup idea / company mission. If omitted, the CLI prompts.",
+    ),
 ) -> None:
-    """Scaffold a clean project from the packaged universal blueprints."""
+    """Scaffold a clean project from packaged blueprints, with the user-provided
+    startup idea substituted into the templated ``{{CORE_PRODUCT_IDEA}}`` and
+    ``{{COMPANY_MISSION}}`` tokens.
+    """
+    if idea is None:
+        idea = typer.prompt("Describe your startup idea")
+    idea = idea.strip()
+    if not idea:
+        raise _err("idea must be a non-empty string")
+
     target = _resolve_target_dir(target_dir)
     if target.exists() and not target.is_dir():
         raise _err(f"target path exists and is not a directory: {target}")
@@ -257,14 +298,18 @@ def init(
 
     try:
         target.mkdir(parents=True, exist_ok=True)
-        _copy_resource_tree(templates.joinpath("AGENTS.md"), target / "AGENTS.md")
+        _copy_resource_tree(
+            templates.joinpath("AGENTS.md"), target / "AGENTS.md", idea=idea
+        )
         _copy_resource_tree(
             templates.joinpath(".claude", "agents"),
             target / ".claude" / "agents",
+            idea=idea,
         )
         _copy_resource_tree(
             templates.joinpath("sprints", "sprint-1.md"),
             target / "sprints" / "sprint-1.md",
+            idea=idea,
         )
     except OSError as e:
         raise _err(f"init failed: {e}") from e
@@ -808,6 +853,91 @@ def state_unlock(ctx: typer.Context) -> None:
         typer.echo("lock cleared")
     else:
         typer.echo("no lock to clear")
+
+
+# ---------------------------------------------------------------------------
+# chief customize — zero-touch persona tuning
+# ---------------------------------------------------------------------------
+
+
+def _substitute_tokens(text: str, idea: str) -> str:
+    """Replace the documented init tokens with the user's idea string.
+
+    Both ``{{COMPANY_MISSION}}`` and ``{{CORE_PRODUCT_IDEA}}`` map to the same
+    ``--idea`` value by design — a single flag drives every template slot.
+    """
+    return (
+        text.replace("{{COMPANY_MISSION}}", idea)
+            .replace("{{CORE_PRODUCT_IDEA}}", idea)
+    )
+
+
+def _append_operational_bias(content: str, focus: str) -> str:
+    """Return ``content`` with ``- {focus}`` appended to ``## Operational Biases``.
+
+    Section boundary = next ``## `` heading (any level-2) or EOF. The new
+    bullet is inserted just before the boundary, after trimming trailing
+    blank lines so the surrounding structure stays clean.
+    """
+    lines = content.splitlines(keepends=True)
+
+    start = next(
+        (i for i, line in enumerate(lines) if line.strip() == "## Operational Biases"),
+        None,
+    )
+    if start is None:
+        raise ValueError("`## Operational Biases` section not found")
+
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if lines[i].startswith("## "):
+            end = i
+            break
+
+    insert_at = end
+    while insert_at > start + 1 and lines[insert_at - 1].strip() == "":
+        insert_at -= 1
+
+    bullet = f"- {focus.strip()}\n"
+    return "".join(lines[:insert_at] + [bullet] + lines[insert_at:])
+
+
+@chief_app.command("customize")
+def chief_customize(
+    ctx: typer.Context,
+    role: str = typer.Argument(..., help="One of: ceo, cpo, cto, cdo, cco."),
+    focus: str = typer.Option(
+        ...,
+        "--focus",
+        help="Bias line to append under the persona's Operational Biases section.",
+    ),
+) -> None:
+    """Append a bias line to ``.claude/agents/<role>.md``.
+
+    Targets the project root resolved by ``--root`` / ``AGENTEAM_ROOT`` / CWD,
+    so it works without opening the file in an editor.
+    """
+    role_norm = role.lower()
+    if role_norm not in CHIEF_ROLES:
+        raise _err(
+            f"unknown role: {role!r} (expected one of: {', '.join(CHIEF_ROLES)})"
+        )
+
+    focus_text = focus.strip()
+    if not focus_text:
+        raise _err("--focus must be a non-empty string")
+
+    agent_file = _root(ctx) / ".claude" / "agents" / f"{role_norm}.md"
+    if not agent_file.exists():
+        raise _err(f"agent file not found: {agent_file}")
+
+    original = agent_file.read_text(encoding="utf-8")
+    try:
+        updated = _append_operational_bias(original, focus_text)
+    except ValueError as e:
+        raise _err(str(e)) from e
+    agent_file.write_text(updated, encoding="utf-8")
+    typer.echo(str(agent_file))
 
 
 # ---------------------------------------------------------------------------
