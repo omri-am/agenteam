@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Optional
 
@@ -81,12 +82,38 @@ sprint_app = typer.Typer(help="Inspect sprint definitions.", no_args_is_help=Tru
 debate_app = typer.Typer(help="Drive the turn-based debate.", no_args_is_help=True)
 adr_app = typer.Typer(help="Decision-record operations.", no_args_is_help=True)
 state_app = typer.Typer(help="State-store maintenance.", no_args_is_help=True)
+chief_app = typer.Typer(
+    help="Customize executive personas without opening files.",
+    no_args_is_help=True,
+)
 
 app.add_typer(pr_app, name="pr")
 app.add_typer(sprint_app, name="sprint")
 app.add_typer(debate_app, name="debate")
 app.add_typer(adr_app, name="adr")
 app.add_typer(state_app, name="state")
+app.add_typer(chief_app, name="chief")
+
+
+# ---------------------------------------------------------------------------
+# Scaffolding constants
+# ---------------------------------------------------------------------------
+
+
+CHIEF_ROLES = ("ceo", "cpo", "cto", "cdo", "cco")
+
+# Mapping from package-relative template path -> project-relative target path.
+# Using forward slashes here is fine: importlib.resources traversal joins with
+# ``/`` regardless of host OS, and ``Path(target_rel)`` on the destination side
+# normalizes to the platform separator at write-time.
+_INIT_TEMPLATES: tuple[tuple[str, str], ...] = (
+    ("sprints/sprint-1.md", "sprints/sprint-1.md"),
+    ("agents/ceo.md", ".claude/agents/ceo.md"),
+    ("agents/cpo.md", ".claude/agents/cpo.md"),
+    ("agents/cto.md", ".claude/agents/cto.md"),
+    ("agents/cdo.md", ".claude/agents/cdo.md"),
+    ("agents/cco.md", ".claude/agents/cco.md"),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -727,6 +754,146 @@ def state_unlock(ctx: typer.Context) -> None:
         typer.echo("lock cleared")
     else:
         typer.echo("no lock to clear")
+
+
+# ---------------------------------------------------------------------------
+# init / chief customize — zero-touch project scaffolding
+# ---------------------------------------------------------------------------
+
+
+def _read_template(rel: str) -> str:
+    """Read a packaged template by package-relative path (POSIX-style)."""
+    resource = files("agenteam").joinpath("templates", *rel.split("/"))
+    with as_file(resource) as p:
+        return Path(p).read_text(encoding="utf-8")
+
+
+def _substitute_tokens(text: str, idea: str) -> str:
+    """Replace the documented init tokens with the user's idea string.
+
+    Both ``{{COMPANY_MISSION}}`` and ``{{CORE_PRODUCT_IDEA}}`` map to the same
+    ``--idea`` value by design — a single flag drives every template slot.
+    """
+    return (
+        text.replace("{{COMPANY_MISSION}}", idea)
+            .replace("{{CORE_PRODUCT_IDEA}}", idea)
+    )
+
+
+@app.command("init")
+def init_cmd(
+    name: str = typer.Argument(..., help="Target project directory name or path."),
+    idea: Optional[str] = typer.Option(
+        None,
+        "--idea",
+        help="Startup idea / company mission. If omitted, the CLI prompts.",
+    ),
+) -> None:
+    """Scaffold a new agenteam project with persona + sprint templates.
+
+    Writes ``sprints/sprint-1.md`` and ``.claude/agents/{role}.md`` into the
+    target directory, substituting the templated tokens with the user-provided
+    idea text. Does not initialise the inner git workspace — run
+    ``agenteam bootstrap`` once you cd into the new directory.
+    """
+    if idea is None:
+        idea = typer.prompt("Describe your startup idea")
+    idea = idea.strip()
+    if not idea:
+        raise _err("idea must be a non-empty string")
+
+    target = Path(name)
+    if not target.is_absolute():
+        target = Path.cwd() / target
+    target = target.resolve()
+
+    # Collision check up front so a partial write never leaves the user
+    # with half a project.
+    planned = [target / Path(*dst.split("/")) for _, dst in _INIT_TEMPLATES]
+    existing = [p for p in planned if p.exists()]
+    if existing:
+        raise _err(
+            "init aborted: target already contains "
+            + ", ".join(str(p) for p in existing)
+        )
+
+    target.mkdir(parents=True, exist_ok=True)
+    for src_rel, dst_rel in _INIT_TEMPLATES:
+        body = _substitute_tokens(_read_template(src_rel), idea)
+        dst = target / Path(*dst_rel.split("/"))
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(body, encoding="utf-8")
+
+    _print_banner()
+    typer.echo(str(target))
+
+
+def _append_operational_bias(content: str, focus: str) -> str:
+    """Return ``content`` with ``- {focus}`` appended to ``## Operational Biases``.
+
+    Section boundary = next ``## `` heading (any level-2) or EOF. The new
+    bullet is inserted just before the boundary, after trimming trailing
+    blank lines so the surrounding structure stays clean.
+    """
+    lines = content.splitlines(keepends=True)
+
+    start = next(
+        (i for i, line in enumerate(lines) if line.strip() == "## Operational Biases"),
+        None,
+    )
+    if start is None:
+        raise ValueError("`## Operational Biases` section not found")
+
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if lines[i].startswith("## "):
+            end = i
+            break
+
+    insert_at = end
+    while insert_at > start + 1 and lines[insert_at - 1].strip() == "":
+        insert_at -= 1
+
+    bullet = f"- {focus.strip()}\n"
+    return "".join(lines[:insert_at] + [bullet] + lines[insert_at:])
+
+
+@chief_app.command("customize")
+def chief_customize(
+    ctx: typer.Context,
+    role: str = typer.Argument(..., help="One of: ceo, cpo, cto, cdo, cco."),
+    focus: str = typer.Option(
+        ...,
+        "--focus",
+        help="Bias line to append under the persona's Operational Biases section.",
+    ),
+) -> None:
+    """Append a bias line to ``.claude/agents/<role>.md``.
+
+    Targets the project root resolved by ``--root`` / ``AGENTEAM_ROOT`` / CWD,
+    so it works without opening the file in an editor.
+    """
+    role_norm = role.lower()
+    if role_norm not in CHIEF_ROLES:
+        raise _err(
+            f"unknown role: {role!r} (expected one of: {', '.join(CHIEF_ROLES)})"
+        )
+
+    focus_text = focus.strip()
+    if not focus_text:
+        raise _err("--focus must be a non-empty string")
+
+    agent_file = _root(ctx) / ".claude" / "agents" / f"{role_norm}.md"
+    if not agent_file.exists():
+        raise _err(f"agent file not found: {agent_file}")
+
+    original = agent_file.read_text(encoding="utf-8")
+    try:
+        updated = _append_operational_bias(original, focus_text)
+    except ValueError as e:
+        raise _err(str(e)) from e
+    agent_file.write_text(updated, encoding="utf-8")
+    typer.echo(str(agent_file))
 
 
 # ---------------------------------------------------------------------------
