@@ -19,6 +19,8 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
+from importlib import resources
+from importlib.abc import Traversable
 from pathlib import Path
 from typing import Optional
 
@@ -128,6 +130,39 @@ def _engine(ctx: typer.Context) -> GitEngine:
     return GitEngine(_root(ctx))
 
 
+def _resource_templates_root() -> Traversable:
+    """Return the immutable templates bundled with the installed package."""
+    return resources.files("agenteam").joinpath("templates")
+
+
+def _copy_resource_tree(
+    source: Traversable,
+    destination: Path,
+) -> None:
+    """Copy an importlib.resources tree to a real filesystem path.
+
+    ``Traversable`` resources may come from an editable source tree, a normal
+    site-packages directory, or a zip-style importer. Reading bytes through the
+    resource API keeps ``init`` independent of where Python installed us.
+    """
+    if source.is_dir():
+        destination.mkdir(parents=True, exist_ok=True)
+        for child in sorted(source.iterdir(), key=lambda p: p.name):
+            _copy_resource_tree(child, destination / child.name)
+        return
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(source.read_bytes())
+
+
+def _resolve_target_dir(target_dir: Path) -> Path:
+    """Resolve a user-supplied init target relative to the active shell CWD."""
+    target = target_dir.expanduser()
+    if not target.is_absolute():
+        target = Path.cwd() / target
+    return target.resolve(strict=False)
+
+
 def _err(msg: str, code: int = 1) -> typer.Exit:
     """Print to stderr and return a ``typer.Exit`` for ``raise _err(...)``.
 
@@ -195,6 +230,52 @@ def _rebuild_schedule(
     appended = DebateState.build(cfg, new_prs).schedule
     debate.schedule.extend(appended)
     debate.pr_ids.extend(p.id for p in new_prs)
+
+
+# ---------------------------------------------------------------------------
+# init
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def init(
+    target_dir: Path = typer.Argument(
+        ...,
+        help="Directory to create for a new isolated agenteam project.",
+    ),
+) -> None:
+    """Scaffold a clean project from the packaged universal blueprints."""
+    target = _resolve_target_dir(target_dir)
+    if target.exists() and not target.is_dir():
+        raise _err(f"target path exists and is not a directory: {target}")
+    if target.exists() and any(target.iterdir()):
+        raise _err(f"target directory is not empty: {target}")
+
+    templates = _resource_templates_root()
+    if not templates.is_dir():
+        raise _err("packaged templates are missing; reinstall agenteam")
+
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        _copy_resource_tree(templates.joinpath("AGENTS.md"), target / "AGENTS.md")
+        _copy_resource_tree(
+            templates.joinpath(".claude", "agents"),
+            target / ".claude" / "agents",
+        )
+        _copy_resource_tree(
+            templates.joinpath("sprints", "sprint-1.md"),
+            target / "sprints" / "sprint-1.md",
+        )
+    except OSError as e:
+        raise _err(f"init failed: {e}") from e
+
+    typer.echo(f"Successfully initialized agenteam project at {target}")
+    typer.echo("")
+    typer.echo("Next steps:")
+    typer.echo(f"  cd {target}")
+    typer.echo("  customize AGENTS.md, .claude/agents/, and sprints/sprint-1.md")
+    typer.echo("  agenteam bootstrap")
+    typer.echo("  open this folder inside your coding agent session")
 
 
 # ---------------------------------------------------------------------------
