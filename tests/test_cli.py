@@ -8,7 +8,9 @@ actually drives the CLI. Each test spawns ``python -m agenteam.cli`` with
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -34,6 +36,63 @@ class TestBootstrap:
         assert "Agent-native C-suite orchestration" in p.stderr
         assert "Usage:" in p.stdout
         assert "bootstrap" in p.stdout  # subcommand listing renders
+
+    def test_defaults_to_current_working_directory_without_env(
+        self, tmp_path: Path
+    ) -> None:
+        """Runtime state belongs to the project directory where the command runs."""
+        project = tmp_path / "outside-source"
+        project.mkdir()
+        env = os.environ.copy()
+        env.pop("AGENTEAM_ROOT", None)
+        project_src = Path(__file__).resolve().parents[1] / "src"
+        env["PYTHONPATH"] = str(project_src) + os.pathsep + env.get("PYTHONPATH", "")
+
+        p = subprocess.run(
+            [sys.executable, "-m", "agenteam.cli", "bootstrap"],
+            cwd=str(project),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert p.returncode == 0, p.stderr
+        assert (project / "workspace" / "main").is_dir()
+        assert (project / "state" / "debates").is_dir()
+        assert "workspace ready at" in p.stdout
+        assert str(project / "workspace") in p.stdout
+
+
+class TestInit:
+    def test_init_scaffolds_clean_project_templates(self, tmp_path: Path) -> None:
+        target = tmp_path / "my-startup"
+        env = os.environ.copy()
+        env.pop("AGENTEAM_ROOT", None)
+        project_src = Path(__file__).resolve().parents[1] / "src"
+        env["PYTHONPATH"] = str(project_src) + os.pathsep + env.get("PYTHONPATH", "")
+
+        p = subprocess.run(
+            [sys.executable, "-m", "agenteam.cli", "init", "my-startup"],
+            cwd=str(tmp_path),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert p.returncode == 0, p.stderr
+        assert (target / "AGENTS.md").is_file()
+        assert (target / ".claude" / "agents" / "ceo.md").is_file()
+        assert (target / ".claude" / "agents" / "cpo.md").is_file()
+        assert (target / ".claude" / "agents" / "cto.md").is_file()
+        assert (target / ".claude" / "agents" / "cdo.md").is_file()
+        assert (target / ".claude" / "agents" / "cco.md").is_file()
+        assert (target / "sprints" / "sprint-1.md").is_file()
+        assert not (target / "src").exists()
+        assert not (target / "state").exists()
+        assert not (target / "workspace").exists()
+        assert "Successfully initialized" in p.stdout
+        assert f"cd {target}" in p.stdout
+        assert "agenteam bootstrap" in p.stdout
 
 
 class TestSprintCommands:
