@@ -37,6 +37,31 @@ class TestBootstrap:
         assert "Usage:" in p.stdout
         assert "bootstrap" in p.stdout  # subcommand listing renders
 
+    def test_defaults_to_current_working_directory_without_env(
+        self, tmp_path: Path
+    ) -> None:
+        """Runtime state belongs to the project directory where the command runs."""
+        project = tmp_path / "outside-source"
+        project.mkdir()
+        env = os.environ.copy()
+        env.pop("AGENTEAM_ROOT", None)
+        project_src = Path(__file__).resolve().parents[1] / "src"
+        env["PYTHONPATH"] = str(project_src) + os.pathsep + env.get("PYTHONPATH", "")
+
+        p = subprocess.run(
+            [sys.executable, "-m", "agenteam.cli", "bootstrap"],
+            cwd=str(project),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert p.returncode == 0, p.stderr
+        assert (project / "workspace" / "main").is_dir()
+        assert (project / "state" / "debates").is_dir()
+        assert "workspace ready at" in p.stdout
+        assert str(project / "workspace") in p.stdout
+
 
 class TestSprintCommands:
     def test_show_emits_valid_json(self, cli) -> None:
@@ -204,9 +229,12 @@ def _agenteam_env(extra_root: Path | None = None) -> dict[str, str]:
     """Env block that points the CLI's import path at the in-tree ``src/``.
 
     ``init`` writes to an arbitrary target directory, not ``AGENTEAM_ROOT``, so
-    these tests do not bind the root unless ``extra_root`` is provided.
+    a stray ``AGENTEAM_ROOT`` inherited from the parent shell is stripped to
+    prevent test flakiness. ``extra_root`` re-introduces it for the
+    ``chief customize`` tests that need a fixed project root.
     """
     env = os.environ.copy()
+    env.pop("AGENTEAM_ROOT", None)
     project_src = Path(__file__).resolve().parents[1] / "src"
     env["PYTHONPATH"] = str(project_src) + os.pathsep + env.get("PYTHONPATH", "")
     if extra_root is not None:
@@ -240,6 +268,7 @@ class TestInit:
 
         target = tmp_path / "fintech-app"
         assert target.is_dir()
+        assert (target / "AGENTS.md").is_file()
         sprint = (target / "sprints" / "sprint-1.md").read_text()
         assert "{{CORE_PRODUCT_IDEA}}" not in sprint
         assert "Trading platform for retail investors" in sprint
@@ -251,6 +280,15 @@ class TestInit:
             # File is structurally valid: frontmatter + heading preserved.
             assert agent.startswith("---\n")
             assert "## Operational Biases" in agent
+
+        # init must not pollute the target with runtime/state directories.
+        assert not (target / "state").exists()
+        assert not (target / "workspace").exists()
+
+        # Friendly next-steps message lands on stdout.
+        assert "Successfully initialized" in p.stdout
+        assert f"cd {target}" in p.stdout
+        assert "agenteam bootstrap" in p.stdout
 
     def test_interactive_prompt_fallback(self, tmp_path: Path) -> None:
         """No --idea flag triggers a typer.prompt; stdin satisfies it."""
@@ -265,12 +303,12 @@ class TestInit:
         sprint = (tmp_path / "indie-game" / "sprints" / "sprint-1.md").read_text()
         assert "Roguelike with procedural narrative" in sprint
 
-    def test_init_refuses_to_overwrite(self, tmp_path: Path) -> None:
+    def test_init_refuses_to_overwrite_non_empty_dir(self, tmp_path: Path) -> None:
         env = _agenteam_env()
         _run(["init", "x", "--idea", "first run"], cwd=tmp_path, env=env)
         p = _run(["init", "x", "--idea", "second run"], cwd=tmp_path, env=env)
         assert p.returncode == 1
-        assert "init aborted" in p.stderr
+        assert "not empty" in p.stderr
 
     def test_init_accepts_absolute_path(self, tmp_path: Path) -> None:
         env = _agenteam_env()

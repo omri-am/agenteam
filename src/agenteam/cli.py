@@ -19,7 +19,8 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
-from importlib.resources import as_file, files
+from importlib import resources
+from importlib.abc import Traversable
 from pathlib import Path
 from typing import Optional
 
@@ -102,19 +103,6 @@ app.add_typer(chief_app, name="chief")
 
 CHIEF_ROLES = ("ceo", "cpo", "cto", "cdo", "cco")
 
-# Mapping from package-relative template path -> project-relative target path.
-# Using forward slashes here is fine: importlib.resources traversal joins with
-# ``/`` regardless of host OS, and ``Path(target_rel)`` on the destination side
-# normalizes to the platform separator at write-time.
-_INIT_TEMPLATES: tuple[tuple[str, str], ...] = (
-    ("sprints/sprint-1.md", "sprints/sprint-1.md"),
-    ("agents/ceo.md", ".claude/agents/ceo.md"),
-    ("agents/cpo.md", ".claude/agents/cpo.md"),
-    ("agents/cto.md", ".claude/agents/cto.md"),
-    ("agents/cdo.md", ".claude/agents/cdo.md"),
-    ("agents/cco.md", ".claude/agents/cco.md"),
-)
-
 
 # ---------------------------------------------------------------------------
 # Globals / helpers
@@ -153,6 +141,53 @@ def _root(ctx: typer.Context) -> Path:
 
 def _engine(ctx: typer.Context) -> GitEngine:
     return GitEngine(_root(ctx))
+
+
+def _resource_templates_root() -> Traversable:
+    """Return the immutable templates bundled with the installed package."""
+    return resources.files("agenteam").joinpath("templates")
+
+
+def _copy_resource_tree(
+    source: Traversable,
+    destination: Path,
+    *,
+    idea: Optional[str] = None,
+) -> None:
+    """Copy an importlib.resources tree to a real filesystem path.
+
+    ``Traversable`` resources may come from an editable source tree, a normal
+    site-packages directory, or a zip-style importer. Reading bytes through the
+    resource API keeps ``init`` independent of where Python installed us.
+
+    When ``idea`` is supplied, UTF-8-decodable files have their templated
+    tokens substituted in-flight; binary files are copied unchanged.
+    """
+    if source.is_dir():
+        destination.mkdir(parents=True, exist_ok=True)
+        for child in sorted(source.iterdir(), key=lambda p: p.name):
+            _copy_resource_tree(child, destination / child.name, idea=idea)
+        return
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    raw = source.read_bytes()
+    if idea is None:
+        destination.write_bytes(raw)
+        return
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        destination.write_bytes(raw)
+        return
+    destination.write_text(_substitute_tokens(text, idea), encoding="utf-8")
+
+
+def _resolve_target_dir(target_dir: Path) -> Path:
+    """Resolve a user-supplied init target relative to the active shell CWD."""
+    target = target_dir.expanduser()
+    if not target.is_absolute():
+        target = Path.cwd() / target
+    return target.resolve(strict=False)
 
 
 def _err(msg: str, code: int = 1) -> typer.Exit:
@@ -222,6 +257,70 @@ def _rebuild_schedule(
     appended = DebateState.build(cfg, new_prs).schedule
     debate.schedule.extend(appended)
     debate.pr_ids.extend(p.id for p in new_prs)
+
+
+# ---------------------------------------------------------------------------
+# init
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def init(
+    target_dir: Path = typer.Argument(
+        ...,
+        help="Directory to create for a new isolated agenteam project.",
+    ),
+    idea: Optional[str] = typer.Option(
+        None,
+        "--idea",
+        help="Startup idea / company mission. If omitted, the CLI prompts.",
+    ),
+) -> None:
+    """Scaffold a clean project from packaged blueprints, with the user-provided
+    startup idea substituted into the templated ``{{CORE_PRODUCT_IDEA}}`` and
+    ``{{COMPANY_MISSION}}`` tokens.
+    """
+    if idea is None:
+        idea = typer.prompt("Describe your startup idea")
+    idea = idea.strip()
+    if not idea:
+        raise _err("idea must be a non-empty string")
+
+    target = _resolve_target_dir(target_dir)
+    if target.exists() and not target.is_dir():
+        raise _err(f"target path exists and is not a directory: {target}")
+    if target.exists() and any(target.iterdir()):
+        raise _err(f"target directory is not empty: {target}")
+
+    templates = _resource_templates_root()
+    if not templates.is_dir():
+        raise _err("packaged templates are missing; reinstall agenteam")
+
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        _copy_resource_tree(
+            templates.joinpath("AGENTS.md"), target / "AGENTS.md", idea=idea
+        )
+        _copy_resource_tree(
+            templates.joinpath(".claude", "agents"),
+            target / ".claude" / "agents",
+            idea=idea,
+        )
+        _copy_resource_tree(
+            templates.joinpath("sprints", "sprint-1.md"),
+            target / "sprints" / "sprint-1.md",
+            idea=idea,
+        )
+    except OSError as e:
+        raise _err(f"init failed: {e}") from e
+
+    typer.echo(f"Successfully initialized agenteam project at {target}")
+    typer.echo("")
+    typer.echo("Next steps:")
+    typer.echo(f"  cd {target}")
+    typer.echo("  customize AGENTS.md, .claude/agents/, and sprints/sprint-1.md")
+    typer.echo("  agenteam bootstrap")
+    typer.echo("  open this folder inside your coding agent session")
 
 
 # ---------------------------------------------------------------------------
@@ -757,15 +856,8 @@ def state_unlock(ctx: typer.Context) -> None:
 
 
 # ---------------------------------------------------------------------------
-# init / chief customize — zero-touch project scaffolding
+# chief customize — zero-touch persona tuning
 # ---------------------------------------------------------------------------
-
-
-def _read_template(rel: str) -> str:
-    """Read a packaged template by package-relative path (POSIX-style)."""
-    resource = files("agenteam").joinpath("templates", *rel.split("/"))
-    with as_file(resource) as p:
-        return Path(p).read_text(encoding="utf-8")
 
 
 def _substitute_tokens(text: str, idea: str) -> str:
@@ -778,54 +870,6 @@ def _substitute_tokens(text: str, idea: str) -> str:
         text.replace("{{COMPANY_MISSION}}", idea)
             .replace("{{CORE_PRODUCT_IDEA}}", idea)
     )
-
-
-@app.command("init")
-def init_cmd(
-    name: str = typer.Argument(..., help="Target project directory name or path."),
-    idea: Optional[str] = typer.Option(
-        None,
-        "--idea",
-        help="Startup idea / company mission. If omitted, the CLI prompts.",
-    ),
-) -> None:
-    """Scaffold a new agenteam project with persona + sprint templates.
-
-    Writes ``sprints/sprint-1.md`` and ``.claude/agents/{role}.md`` into the
-    target directory, substituting the templated tokens with the user-provided
-    idea text. Does not initialise the inner git workspace — run
-    ``agenteam bootstrap`` once you cd into the new directory.
-    """
-    if idea is None:
-        idea = typer.prompt("Describe your startup idea")
-    idea = idea.strip()
-    if not idea:
-        raise _err("idea must be a non-empty string")
-
-    target = Path(name)
-    if not target.is_absolute():
-        target = Path.cwd() / target
-    target = target.resolve()
-
-    # Collision check up front so a partial write never leaves the user
-    # with half a project.
-    planned = [target / Path(*dst.split("/")) for _, dst in _INIT_TEMPLATES]
-    existing = [p for p in planned if p.exists()]
-    if existing:
-        raise _err(
-            "init aborted: target already contains "
-            + ", ".join(str(p) for p in existing)
-        )
-
-    target.mkdir(parents=True, exist_ok=True)
-    for src_rel, dst_rel in _INIT_TEMPLATES:
-        body = _substitute_tokens(_read_template(src_rel), idea)
-        dst = target / Path(*dst_rel.split("/"))
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_text(body, encoding="utf-8")
-
-    _print_banner()
-    typer.echo(str(target))
 
 
 def _append_operational_bias(content: str, focus: str) -> str:

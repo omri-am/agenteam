@@ -27,7 +27,11 @@ agenteam = "agenteam.cli:app"
 where = ["src"]
 
 [tool.setuptools.package-data]
-agenteam = ["templates/sprints/*.md", "templates/agents/*.md"]
+agenteam = [
+    "templates/AGENTS.md",
+    "templates/.claude/agents/*.md",
+    "templates/sprints/*.md",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
