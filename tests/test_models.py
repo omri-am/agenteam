@@ -7,9 +7,14 @@ from pydantic import ValidationError
 
 from agenteam.models import (
     DebateState,
+    DebateTurn,
     DecisionRecord,
+    PRStatus,
     PullRequest,
+    ReviewComment,
     SprintConfig,
+    TurnPhase,
+    Verdict,
 )
 
 
@@ -123,3 +128,95 @@ class TestDecisionRecordMarkdown:
         md = self._record(options=["First", "Second"]).to_markdown()
         assert "- First" in md
         assert "- Second" in md
+
+
+class TestReviewCommentVerdict:
+    def _pr(self, *reviews: ReviewComment) -> PullRequest:
+        return PullRequest(
+            id="pr-1", title="t", branch="b", author="a", sprint_id="s",
+            reviews=list(reviews),
+        )
+
+    def test_approve_counts_toward_quorum(self) -> None:
+        pr = self._pr(
+            ReviewComment(reviewer="b", comment="ok", verdict=Verdict.APPROVE),
+        )
+        assert pr.approval_count == 1
+        assert pr.open_change_requests == []
+
+    def test_request_changes_does_not_count(self) -> None:
+        pr = self._pr(
+            ReviewComment(reviewer="b", comment="nope", verdict=Verdict.REQUEST_CHANGES),
+        )
+        assert pr.approval_count == 0
+        assert pr.open_change_requests == ["b"]
+
+    def test_withdraw_clears_change_request(self) -> None:
+        pr = self._pr(
+            ReviewComment(reviewer="b", comment="nope", verdict=Verdict.REQUEST_CHANGES),
+            ReviewComment(
+                reviewer="b", comment="ok now", verdict=Verdict.APPROVE,
+                phase=TurnPhase.FOLLOWUP,
+            ),
+        )
+        assert pr.approval_count == 1
+        assert pr.open_change_requests == []
+
+    def test_rebuttal_does_not_count_as_verdict(self) -> None:
+        """Author rebuttals are excluded from approval / open-CR tallies."""
+        pr = self._pr(
+            ReviewComment(reviewer="b", comment="nope", verdict=Verdict.REQUEST_CHANGES),
+            ReviewComment(
+                reviewer="a", comment="addressed", verdict=Verdict.COMMENT,
+                phase=TurnPhase.REBUTTAL,
+            ),
+        )
+        assert pr.approval_count == 0
+        assert pr.open_change_requests == ["b"]
+
+    def test_legacy_approved_field_migrates(self) -> None:
+        """Pre-schema-2 dicts that still carry `approved: bool` deserialize."""
+        legacy = {"reviewer": "b", "comment": "ok", "approved": True}
+        rc = ReviewComment.model_validate(legacy)
+        assert rc.verdict == Verdict.APPROVE
+        assert rc.phase == TurnPhase.REVIEW
+
+        legacy_false = {"reviewer": "b", "comment": "meh", "approved": False}
+        rc2 = ReviewComment.model_validate(legacy_false)
+        assert rc2.verdict == Verdict.COMMENT
+
+
+class TestDebateTurnPhase:
+    def test_default_phase_is_review(self) -> None:
+        t = DebateTurn(round_idx=0, speaker="a", target_pr_id="pr-1")
+        assert t.phase == TurnPhase.REVIEW
+        assert t.parent_turn_idx is None
+
+    def test_followup_records_parent(self) -> None:
+        t = DebateTurn(
+            round_idx=0, speaker="b", target_pr_id="pr-1",
+            phase=TurnPhase.FOLLOWUP, parent_turn_idx=4,
+        )
+        assert t.parent_turn_idx == 4
+
+
+class TestPRStatusEnum:
+    def test_deadlocked_and_changes_requested_present(self) -> None:
+        assert PRStatus.DEADLOCKED.value == "DEADLOCKED"
+        assert PRStatus.CHANGES_REQUESTED.value == "CHANGES_REQUESTED"
+
+
+class TestSprintConfigRebuttalDepth:
+    def test_default_is_one(self) -> None:
+        cfg = SprintConfig(
+            id="s", title="t", participants=["a", "b"],
+            debate_rounds=1, approval_quorum=1,
+        )
+        assert cfg.rebuttal_depth == 1
+
+    def test_rebuttal_depth_capped_at_three(self) -> None:
+        with pytest.raises(ValidationError):
+            SprintConfig(
+                id="s", title="t", participants=["a", "b"],
+                debate_rounds=1, approval_quorum=1, rebuttal_depth=4,
+            )

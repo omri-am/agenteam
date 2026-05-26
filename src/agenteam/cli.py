@@ -29,6 +29,7 @@ import typer
 from .git_engine import GitCommandError, GitEngine, MergeConflict
 from .models import (
     DebateState,
+    DebateTurn,
     DecisionRecord,
     Message,
     MessageType,
@@ -36,6 +37,8 @@ from .models import (
     PullRequest,
     ReviewComment,
     SprintConfig,
+    TurnPhase,
+    Verdict,
 )
 from .sprint_loader import SprintParseError, list_sprints, load_sprint
 from .state import (
@@ -510,6 +513,44 @@ def pr_open(
     typer.echo(pr_id)
 
 
+def _recompute_pr_status(pr: PullRequest) -> None:
+    """Derive ``pr.status`` from current review state.
+
+    Order of precedence (terminal states stay terminal):
+      1. ``MERGED`` / ``REJECTED`` — leave untouched.
+      2. Any reviewer posted a FOLLOWUP with verdict ``REQUEST_CHANGES``
+         ("stand") → DEADLOCKED. They've used their follow-up beat and
+         haven't yielded; no more turns are available so the debate can't
+         resolve without a human.
+      3. ``pr.open_change_requests`` non-empty → CHANGES_REQUESTED.
+      4. At least one review exists → UNDER_REVIEW.
+      5. No reviews → OPEN.
+    """
+    if pr.status in (PRStatus.MERGED, PRStatus.REJECTED):
+        return
+    if any(
+        r.phase == TurnPhase.FOLLOWUP and r.verdict == Verdict.REQUEST_CHANGES
+        for r in pr.reviews
+    ):
+        pr.status = PRStatus.DEADLOCKED
+        return
+    if pr.open_change_requests:
+        pr.status = PRStatus.CHANGES_REQUESTED
+        return
+    if pr.reviews:
+        pr.status = PRStatus.UNDER_REVIEW
+        return
+    pr.status = PRStatus.OPEN
+
+
+def _rebuttal_slot_idx(debate: DebateState, pr_id: str) -> Optional[int]:
+    """Return the index of the REBUTTAL slot for ``pr_id``, or None."""
+    for i, t in enumerate(debate.schedule):
+        if t.phase == TurnPhase.REBUTTAL and t.target_pr_id == pr_id:
+            return i
+    return None
+
+
 @pr_app.command("comment")
 def pr_comment(
     ctx: typer.Context,
@@ -517,17 +558,64 @@ def pr_comment(
     reviewer: str = typer.Option(..., "--reviewer"),
     comment: str = typer.Option(..., "--comment"),
     file: Optional[str] = typer.Option(None, "--file"),
-    approve: bool = typer.Option(False, "--approve"),
+    approve: bool = typer.Option(
+        False,
+        "--approve",
+        help="Deprecated alias for --verdict APPROVE.",
+    ),
+    verdict_raw: Optional[str] = typer.Option(
+        None,
+        "--verdict",
+        help="APPROVE | REQUEST_CHANGES | COMMENT. Defaults to COMMENT.",
+    ),
+    phase_raw: str = typer.Option(
+        "REVIEW",
+        "--phase",
+        help="REVIEW | REBUTTAL | FOLLOWUP. Defaults to REVIEW.",
+    ),
+    parent_turn_idx: Optional[int] = typer.Option(
+        None,
+        "--parent-turn-idx",
+        help="Required for FOLLOWUP: index of the REBUTTAL slot being answered.",
+    ),
 ) -> None:
     """Append a review to a PR and a REVIEW message to the sprint transcript.
+
+    The phase determines which beat of the rebuttal protocol the comment
+    belongs to (initial REVIEW, author REBUTTAL, or reviewer FOLLOWUP) and
+    drives both the self-review guard (REBUTTAL requires
+    ``reviewer == pr.author``; other phases forbid it) and schedule
+    extensions (a first REQUEST_CHANGES appends a REBUTTAL slot; a posted
+    REBUTTAL appends one FOLLOWUP slot per open change-requester).
 
     Ordering invariant: the orchestrator is expected to call ``debate
     next-turn`` *before* ``pr comment`` for the resulting review. The
     transcript's ``round_idx`` is attributed to the turn the cursor most
     recently consumed (``cursor - 1``); calling ``pr comment`` without a
     prior ``next-turn`` would record the review under round 0 by default.
-    The documented sprint loop in AGENTS.md follows this ordering.
     """
+    if approve and verdict_raw is not None:
+        raise _err("--approve and --verdict are mutually exclusive")
+    if approve:
+        verdict = Verdict.APPROVE
+    elif verdict_raw is not None:
+        try:
+            verdict = Verdict(verdict_raw)
+        except ValueError as e:
+            raise _err(
+                f"invalid --verdict {verdict_raw!r}; "
+                f"expected one of: {', '.join(v.value for v in Verdict)}"
+            ) from e
+    else:
+        verdict = Verdict.COMMENT
+    try:
+        phase = TurnPhase(phase_raw)
+    except ValueError as e:
+        raise _err(
+            f"invalid --phase {phase_raw!r}; "
+            f"expected one of: {', '.join(p.value for p in TurnPhase)}"
+        ) from e
+
     root = _root(ctx)
     try:
         with state_lock(root):
@@ -535,15 +623,26 @@ def pr_comment(
             if id not in prs:
                 raise _err(f"unknown PR: {id}")
             pr = prs[id]
-            if reviewer == pr.author:
-                raise _err(f"reviewer {reviewer!r} cannot review own PR {id}")
+            cfg = _load_sprint_or_die(root, pr.sprint_id)
+
+            _enforce_phase_preconditions(
+                pr=pr,
+                reviewer=reviewer,
+                phase=phase,
+                verdict=verdict,
+                cfg=cfg,
+                parent_turn_idx=parent_turn_idx,
+            )
 
             review = ReviewComment(
-                reviewer=reviewer, file=file, comment=comment, approved=approve
+                reviewer=reviewer,
+                file=file,
+                comment=comment,
+                verdict=verdict,
+                phase=phase,
             )
             pr.reviews.append(review)
-            if pr.status == PRStatus.OPEN:
-                pr.status = PRStatus.UNDER_REVIEW
+            _recompute_pr_status(pr)
             prs[id] = pr
             PRRegistry.save(root, prs)
 
@@ -561,17 +660,147 @@ def pr_comment(
                 id=f"msg-{_short_id(id, reviewer, comment, datetime.now(timezone.utc).isoformat())}",
                 sender=reviewer,
                 recipient=pr.author,
-                msg_type=MessageType.REVIEW,
+                msg_type=(
+                    MessageType.DECISION
+                    if phase != TurnPhase.REVIEW
+                    else MessageType.REVIEW
+                ),
                 content=comment,
                 parent_id=id,
                 round_idx=round_idx,
             )
             debate.transcript.append(msg)
+
+            _extend_schedule_after_comment(debate, pr, phase, verdict)
             DebateStore.save(root, debate)
     except StateLockTimeout as e:
         raise _err(str(e)) from e
 
-    typer.echo(json.dumps({"pr": id, "reviewer": reviewer, "approved": approve}))
+    typer.echo(
+        json.dumps(
+            {
+                "pr": id,
+                "reviewer": reviewer,
+                "verdict": verdict.value,
+                "phase": phase.value,
+                "status": pr.status.value,
+            }
+        )
+    )
+
+
+def _enforce_phase_preconditions(
+    *,
+    pr: PullRequest,
+    reviewer: str,
+    phase: TurnPhase,
+    verdict: Verdict,
+    cfg: SprintConfig,
+    parent_turn_idx: Optional[int],
+) -> None:
+    """Reject malformed phase/verdict/reviewer combinations before append.
+
+    The CLI enforces these as hard guards so the playbook contract doesn't
+    rely on the LLM doing the right thing — same posture as the original
+    reviewer-author guard.
+    """
+    if pr.status in (PRStatus.MERGED, PRStatus.REJECTED):
+        raise _err(f"PR {pr.id} is {pr.status.value}; no further comments accepted")
+
+    if phase == TurnPhase.REVIEW:
+        if reviewer == pr.author:
+            raise _err(
+                f"reviewer {reviewer!r} cannot review own PR {pr.id} "
+                "(authors push back via --phase REBUTTAL)"
+            )
+        return
+
+    if phase == TurnPhase.REBUTTAL:
+        if reviewer != pr.author:
+            raise _err(
+                f"--phase REBUTTAL requires reviewer == pr.author "
+                f"(got reviewer={reviewer!r}, author={pr.author!r})"
+            )
+        if pr.status != PRStatus.CHANGES_REQUESTED:
+            raise _err(
+                f"--phase REBUTTAL only valid when PR status is CHANGES_REQUESTED "
+                f"(current: {pr.status.value})"
+            )
+        if any(r.phase == TurnPhase.REBUTTAL for r in pr.reviews):
+            raise _err(
+                f"PR {pr.id} already has a REBUTTAL; cap is 1 rebuttal per PR"
+            )
+        return
+
+    if phase == TurnPhase.FOLLOWUP:
+        if reviewer == pr.author:
+            raise _err("--phase FOLLOWUP cannot be posted by PR author")
+        if reviewer not in pr.open_change_requests:
+            raise _err(
+                f"--phase FOLLOWUP only valid for reviewers in "
+                f"open_change_requests (currently: {pr.open_change_requests})"
+            )
+        if not any(r.phase == TurnPhase.REBUTTAL for r in pr.reviews):
+            raise _err("--phase FOLLOWUP requires a prior REBUTTAL from the author")
+        existing = sum(
+            1
+            for r in pr.reviews
+            if r.phase == TurnPhase.FOLLOWUP and r.reviewer == reviewer
+        )
+        if existing >= cfg.rebuttal_depth:
+            raise _err(
+                f"reviewer {reviewer!r} exceeded rebuttal_depth "
+                f"({cfg.rebuttal_depth}) on PR {pr.id}"
+            )
+        if parent_turn_idx is None:
+            raise _err("--phase FOLLOWUP requires --parent-turn-idx")
+
+
+def _extend_schedule_after_comment(
+    debate: DebateState,
+    pr: PullRequest,
+    phase: TurnPhase,
+    verdict: Verdict,
+) -> None:
+    """Append REBUTTAL / FOLLOWUP slots in response to verdict events.
+
+    Schedule is append-only — consumed slots and their ordering are never
+    touched here. This is the contract softening called out in
+    AGENTS.md §6.
+    """
+    if phase == TurnPhase.REVIEW and verdict == Verdict.REQUEST_CHANGES:
+        if _rebuttal_slot_idx(debate, pr.id) is None:
+            debate.schedule.append(
+                DebateTurn(
+                    round_idx=0,
+                    speaker=pr.author,
+                    target_pr_id=pr.id,
+                    phase=TurnPhase.REBUTTAL,
+                )
+            )
+        return
+
+    if phase == TurnPhase.REBUTTAL:
+        rebuttal_idx = _rebuttal_slot_idx(debate, pr.id)
+        for cr_reviewer in pr.open_change_requests:
+            # Skip if this reviewer already has a FOLLOWUP slot scheduled.
+            already_scheduled = any(
+                t.phase == TurnPhase.FOLLOWUP
+                and t.target_pr_id == pr.id
+                and t.speaker == cr_reviewer
+                for t in debate.schedule
+            )
+            if already_scheduled:
+                continue
+            debate.schedule.append(
+                DebateTurn(
+                    round_idx=0,
+                    speaker=cr_reviewer,
+                    target_pr_id=pr.id,
+                    phase=TurnPhase.FOLLOWUP,
+                    parent_turn_idx=rebuttal_idx,
+                )
+            )
 
 
 @pr_app.command("list")
@@ -605,48 +834,89 @@ def pr_list(
         )
 
 
+def _merge_pr(
+    ctx: typer.Context,
+    prs: dict[str, PullRequest],
+    id: str,
+    *,
+    force_deadlock: bool = False,
+) -> str:
+    """Shared merge implementation used by ``pr merge`` and ``human-gate``.
+
+    Caller holds the state lock and is responsible for persisting ``prs``
+    via :meth:`PRRegistry.save` on success. The conflict path persists
+    inline because we mutate ``pr.status`` and ``pr.conflict_details`` and
+    then raise ``typer.Exit``.
+
+    ``force_deadlock`` makes the human-gate the final arbiter for a
+    deadlocked PR: it bypasses both the ``DEADLOCKED`` guard and the
+    open-change-request guard (the human is explicitly overriding a
+    "stand" follow-up). The quorum guard still fires — a PR that no spoke
+    ever approved should never merge silently, even via the gate.
+    """
+    root = _root(ctx)
+    if id not in prs:
+        raise _err(f"unknown PR: {id}")
+    pr = prs[id]
+    if pr.status in (PRStatus.MERGED, PRStatus.REJECTED):
+        raise _err(f"PR {id} already {pr.status.value}")
+
+    cfg = _load_sprint_or_die(root, pr.sprint_id)
+
+    if pr.status == PRStatus.DEADLOCKED and not force_deadlock:
+        raise _err(
+            f"PR {id} is DEADLOCKED; resolve via "
+            f"'agenteam human-gate --sprint {pr.sprint_id} --resolve-deadlocks' "
+            "before merging"
+        )
+    if pr.approval_count < cfg.approval_quorum:
+        raise _err(
+            f"PR {id} has {pr.approval_count} approvals "
+            f"(quorum is {cfg.approval_quorum})"
+        )
+    if pr.open_change_requests and not force_deadlock:
+        raise _err(
+            f"PR {id} has {len(pr.open_change_requests)} open change request(s) "
+            f"from: {', '.join(pr.open_change_requests)}"
+        )
+
+    try:
+        merge_sha = _engine(ctx).merge_branch(pr.branch, base=pr.base)
+    except MergeConflict as e:
+        pr.status = PRStatus.REJECTED
+        pr.conflict_details = e.details
+        prs[id] = pr
+        PRRegistry.save(root, prs)
+        raise _err(f"merge conflict: {e.details}", code=2) from e
+    except GitCommandError as e:
+        raise _err(f"merge failed: {e}") from e
+
+    pr.status = PRStatus.MERGED
+    prs[id] = pr
+    return merge_sha
+
+
 @pr_app.command("merge")
 def pr_merge(
     ctx: typer.Context,
     id: str = typer.Option(..., "--id"),
 ) -> None:
-    """Merge an approved PR; mark REJECTED on conflict."""
+    """Merge an approved PR.
+
+    Hardened predicate (in order): not DEADLOCKED, quorum met, no open
+    change requests, no merge conflict. On conflict the PR is marked
+    REJECTED and the command exits 2.
+    """
     root = _root(ctx)
     try:
         with state_lock(root):
             prs = PRRegistry.load(root)
-            if id not in prs:
-                raise _err(f"unknown PR: {id}")
-            pr = prs[id]
-            if pr.status in (PRStatus.MERGED, PRStatus.REJECTED):
-                raise _err(f"PR {id} already {pr.status.value}")
-
-            cfg = _load_sprint_or_die(root, pr.sprint_id)
-
-            if pr.approval_count < cfg.approval_quorum:
-                raise _err(
-                    f"PR {id} has {pr.approval_count} approvals "
-                    f"(quorum is {cfg.approval_quorum})"
-                )
-
-            try:
-                merge_sha = _engine(ctx).merge_branch(pr.branch, base=pr.base)
-            except MergeConflict as e:
-                pr.status = PRStatus.REJECTED
-                pr.conflict_details = e.details
-                prs[id] = pr
-                PRRegistry.save(root, prs)
-                raise _err(f"merge conflict: {e.details}", code=2) from e
-            except GitCommandError as e:
-                raise _err(f"merge failed: {e}") from e
-
-            pr.status = PRStatus.MERGED
-            prs[id] = pr
+            sha = _merge_pr(ctx, prs, id)
             PRRegistry.save(root, prs)
     except StateLockTimeout as e:
         raise _err(str(e)) from e
 
-    typer.echo(merge_sha)
+    typer.echo(sha)
 
 
 # ---------------------------------------------------------------------------
@@ -654,12 +924,87 @@ def pr_merge(
 # ---------------------------------------------------------------------------
 
 
+def _pr_converged(pr: PullRequest, cfg: SprintConfig) -> bool:
+    """A non-terminal PR is "done" if it has quorum + no open change requests."""
+    return (
+        pr.status not in (PRStatus.MERGED, PRStatus.REJECTED, PRStatus.DEADLOCKED)
+        and pr.approval_count >= cfg.approval_quorum
+        and not pr.open_change_requests
+    )
+
+
+def _termination(
+    sprint_prs: list[PullRequest],
+    cfg: SprintConfig,
+) -> Optional[dict]:
+    """Return a ``done`` payload if every PR is resolved one way or another.
+
+    Convergence rule (per the user's "convergence over coverage" choice):
+    every PR must be (a) MERGED, (b) REJECTED, (c) DEADLOCKED, or (d)
+    quorum met + no open change requests. Otherwise the debate is not
+    finished even if the pre-computed schedule has been drained.
+    """
+    if not sprint_prs:
+        return {"done": True, "reason": "no_prs"}
+
+    deadlocked: list[str] = []
+    pending: list[str] = []
+    merged_or_converged = 0
+    rejected = 0
+    for p in sprint_prs:
+        if p.status == PRStatus.MERGED:
+            merged_or_converged += 1
+        elif p.status == PRStatus.REJECTED:
+            rejected += 1
+        elif p.status == PRStatus.DEADLOCKED:
+            deadlocked.append(p.id)
+        elif _pr_converged(p, cfg):
+            merged_or_converged += 1
+        else:
+            pending.append(p.id)
+
+    if pending:
+        return None
+
+    if deadlocked:
+        return {
+            "done": True,
+            "reason": "deadlocked",
+            "deadlocked_prs": deadlocked,
+        }
+    if merged_or_converged > 0:
+        return {"done": True, "reason": "quorum_met"}
+    return {"done": True, "reason": "all_rejected"}
+
+
+def _rebuttal_msg_id(pr: PullRequest) -> Optional[str]:
+    """Return ``Message.id`` of the most recent REBUTTAL transcript line.
+
+    Used to surface the exact rebuttal text to a FOLLOWUP subagent. The
+    transcript message ID is computed in :func:`pr_comment`; we reconstruct
+    the same id via :func:`_short_id` so callers don't need to re-load the
+    debate transcript.
+    """
+    for r in reversed(pr.reviews):
+        if r.phase == TurnPhase.REBUTTAL:
+            return (
+                f"msg-{_short_id(pr.id, r.reviewer, r.comment, r.timestamp.isoformat())}"
+            )
+    return None
+
+
 @debate_app.command("next-turn")
 def debate_next_turn(
     ctx: typer.Context,
     sprint: str = typer.Option(..., "--sprint"),
 ) -> None:
-    """Return the next (round, speaker, pr_id) tuple or {done: true}.
+    """Return the next required turn or ``{"done": true, "reason": ...}``.
+
+    Termination is now verdict-based: even if the pre-computed schedule has
+    more slots, the debate is "done" the moment every PR is either terminal
+    (MERGED / REJECTED / DEADLOCKED) or has quorum + zero open change
+    requests. The pre-computed schedule is therefore an upper bound, not a
+    fixed length.
 
     Advance-then-save ordering is deliberate: if ``DebateStore.save`` raises
     (disk full, permission flip), the in-memory ``cursor`` mutation is
@@ -670,30 +1015,115 @@ def debate_next_turn(
     root = _root(ctx)
     try:
         with state_lock(root):
+            cfg = _load_sprint_or_die(root, sprint)
+            prs = PRRegistry.load(root)
+            sprint_prs = sorted(
+                [p for p in prs.values() if p.sprint_id == sprint],
+                key=lambda p: p.created_at,
+            )
+
+            done = _termination(sprint_prs, cfg)
+            if done is not None:
+                typer.echo(json.dumps(done))
+                return
+
             debate = DebateStore.load(root, sprint)
             if debate is None or not debate.schedule:
-                typer.echo(json.dumps({"done": True, "reason": "no schedule"}))
+                typer.echo(json.dumps({"done": True, "reason": "no_schedule"}))
                 return
 
-            turn = debate.current_turn()
-            if turn is None:
-                typer.echo(json.dumps({"done": True}))
-                return
+            turn: Optional[DebateTurn] = None
+            while debate.cursor < len(debate.schedule):
+                candidate = debate.schedule[debate.cursor]
+                pr = next(
+                    (p for p in sprint_prs if p.id == candidate.target_pr_id),
+                    None,
+                )
+                if pr is None or not _turn_still_meaningful(candidate, pr, cfg):
+                    debate.advance()
+                    continue
+                turn = candidate
+                debate.advance()
+                break
 
-            debate.advance()
             DebateStore.save(root, debate)
+
+            if turn is None:
+                # Schedule exhausted but not every PR converged. This is
+                # the "schedule_exhausted" exit — orchestrator should treat
+                # like deadlock if any PR is still open.
+                done = _termination(sprint_prs, cfg)
+                if done is not None:
+                    typer.echo(json.dumps(done))
+                    return
+                typer.echo(
+                    json.dumps(
+                        {
+                            "done": True,
+                            "reason": "schedule_exhausted",
+                            "open_prs": [
+                                p.id
+                                for p in sprint_prs
+                                if p.status
+                                not in (
+                                    PRStatus.MERGED,
+                                    PRStatus.REJECTED,
+                                    PRStatus.DEADLOCKED,
+                                )
+                                and not _pr_converged(p, cfg)
+                            ],
+                        }
+                    )
+                )
+                return
     except StateLockTimeout as e:
         raise _err(str(e)) from e
 
-    typer.echo(
-        json.dumps(
-            {
-                "round": turn.round_idx,
-                "speaker": turn.speaker,
-                "pr_id": turn.target_pr_id,
-            }
-        )
-    )
+    target_pr = next(p for p in sprint_prs if p.id == turn.target_pr_id)
+    result: dict = {
+        "round": turn.round_idx,
+        "speaker": turn.speaker,
+        "pr_id": turn.target_pr_id,
+        "phase": turn.phase.value,
+    }
+    if turn.parent_turn_idx is not None:
+        result["parent_turn_idx"] = turn.parent_turn_idx
+    if turn.phase == TurnPhase.REVIEW:
+        result["prompt_hint"] = "initial_review"
+    elif turn.phase == TurnPhase.REBUTTAL:
+        result["prompt_hint"] = "address_change_requests"
+        result["open_change_requests"] = target_pr.open_change_requests
+    elif turn.phase == TurnPhase.FOLLOWUP:
+        result["prompt_hint"] = "decide_stand_or_withdraw"
+        rebuttal_id = _rebuttal_msg_id(target_pr)
+        if rebuttal_id is not None:
+            result["rebuttal_msg_id"] = rebuttal_id
+    typer.echo(json.dumps(result))
+
+
+def _turn_still_meaningful(
+    turn: DebateTurn,
+    pr: PullRequest,
+    cfg: SprintConfig,
+) -> bool:
+    """Return False if the scheduled turn no longer makes sense.
+
+    Examples:
+      * the PR was merged / rejected / deadlocked before this slot ran;
+      * a REVIEW slot fires for a PR that already has quorum + no open
+        change requests (skip to keep the simulation efficient);
+      * a REBUTTAL slot fires but no change requests are open (the
+        author has nothing to rebut).
+    """
+    if pr.status in (PRStatus.MERGED, PRStatus.REJECTED, PRStatus.DEADLOCKED):
+        return False
+    if _pr_converged(pr, cfg):
+        return False
+    if turn.phase == TurnPhase.REBUTTAL and not pr.open_change_requests:
+        return False
+    if turn.phase == TurnPhase.FOLLOWUP and turn.speaker not in pr.open_change_requests:
+        return False
+    return True
 
 
 @debate_app.command("tail")
@@ -726,9 +1156,32 @@ def debate_tail(
 
 @app.command("human-gate")
 def human_gate(
-    message: str = typer.Option(..., "--message"),
+    ctx: typer.Context,
+    message: Optional[str] = typer.Option(None, "--message"),
+    sprint: Optional[str] = typer.Option(None, "--sprint"),
+    resolve_deadlocks: bool = typer.Option(
+        False,
+        "--resolve-deadlocks",
+        help="Iterate over DEADLOCKED PRs in --sprint and prompt the human "
+             "to [m]erge / [r]eject / [a]dr-options / [s]kip each one.",
+    ),
 ) -> None:
-    """Print a banner and block on stdin until the human presses Enter."""
+    """Default mode: print a banner and block on stdin until Enter.
+
+    With ``--resolve-deadlocks --sprint <s>`` the command instead walks
+    every DEADLOCKED PR in the sprint, shows the rebuttal + every "stand"
+    follow-up, and applies the human's choice. This is the only path that
+    can merge a PR whose status is DEADLOCKED.
+    """
+    if resolve_deadlocks:
+        if not sprint:
+            raise _err("--resolve-deadlocks requires --sprint <id>")
+        _resolve_deadlocks_loop(ctx, sprint)
+        return
+
+    if not message:
+        raise _err("--message is required (or pass --resolve-deadlocks --sprint <s>)")
+
     bar = "=" * 72
     typer.echo(f"\n{bar}")
     typer.echo(f"  HUMAN GATE: {message}")
@@ -740,6 +1193,110 @@ def human_gate(
         # immediate continuation. The banner is still printed so the log
         # records the gate was passed through.
         typer.echo("(no tty — auto-continuing)")
+
+
+def _resolve_deadlocks_loop(ctx: typer.Context, sprint: str) -> None:
+    """Walk every DEADLOCKED PR in ``sprint`` and apply the human's choice.
+
+    Per-PR prompt: ``[m]erge / [r]eject / [a]dr-options / [s]kip``.
+
+    Choices:
+      * ``m`` — call :func:`_merge_pr` with ``force_deadlock=True`` so the
+        DEADLOCKED guard is bypassed (quorum + open-change-request guards
+        still fire).
+      * ``r`` — mark the PR REJECTED.
+      * ``a`` — keep status as DEADLOCKED but stamp ``human_disposition``
+        so :func:`adr_record` surfaces both positions in the ADR Options
+        block instead of merging either.
+      * ``s`` — leave the PR untouched (operator wants to come back later).
+
+    EOF / non-interactive: every remaining PR is treated as "skip" and the
+    command exits cleanly so scripted runs don't hang.
+    """
+    root = _root(ctx)
+    try:
+        with state_lock(root):
+            prs = PRRegistry.load(root)
+            deadlocked = sorted(
+                [p for p in prs.values() if p.sprint_id == sprint
+                 and p.status == PRStatus.DEADLOCKED],
+                key=lambda p: p.created_at,
+            )
+            if not deadlocked:
+                typer.echo(json.dumps({"resolved": [], "reason": "no_deadlocks"}))
+                return
+
+            bar = "=" * 72
+            resolutions: list[dict] = []
+            # Human-readable prose flows to stderr so stdout stays a clean
+            # JSON channel for the orchestrator. Matches the same
+            # separation used by `bootstrap` (banner → stderr, info → stdout).
+            for pr in deadlocked:
+                typer.echo(f"\n{bar}", err=True)
+                typer.echo(f"  DEADLOCK: {pr.id} — {pr.title}", err=True)
+                typer.echo(
+                    f"  author: {pr.author}  approvals: {pr.approval_count}  "
+                    f"open change requests: "
+                    f"{', '.join(pr.open_change_requests) or '(none)'}",
+                    err=True,
+                )
+                typer.echo(f"{bar}", err=True)
+                rebuttals = [r for r in pr.reviews if r.phase == TurnPhase.REBUTTAL]
+                if rebuttals:
+                    typer.echo(
+                        f"  REBUTTAL ({rebuttals[-1].reviewer}): "
+                        f"{rebuttals[-1].comment}",
+                        err=True,
+                    )
+                stands = [
+                    r for r in pr.reviews
+                    if r.phase == TurnPhase.FOLLOWUP
+                    and r.verdict == Verdict.REQUEST_CHANGES
+                ]
+                for s in stands:
+                    typer.echo(f"  STAND ({s.reviewer}): {s.comment}", err=True)
+
+                # ``input`` writes its prompt to stdout by default, which
+                # would mix banner prose into the JSON channel. Use
+                # sys.stderr.write + sys.stdin.readline so the prompt stays
+                # on stderr too and stdout remains JSON-only.
+                import sys as _sys
+                _sys.stderr.write(
+                    "  choose [m]erge / [r]eject / [a]dr-options / [s]kip: "
+                )
+                _sys.stderr.flush()
+                line = _sys.stdin.readline()
+                if not line:
+                    typer.echo(
+                        "(no tty — skipping remaining deadlocks)", err=True
+                    )
+                    break
+                choice = line.strip().lower()
+
+                if choice.startswith("m"):
+                    try:
+                        sha = _merge_pr(ctx, prs, pr.id, force_deadlock=True)
+                    except typer.Exit:
+                        # _merge_pr already printed the reason on stderr
+                        # and persisted any conflict-driven state changes.
+                        resolutions.append({"pr": pr.id, "action": "merge_failed"})
+                        continue
+                    resolutions.append({"pr": pr.id, "action": "merge", "sha": sha})
+                elif choice.startswith("r"):
+                    pr.status = PRStatus.REJECTED
+                    prs[pr.id] = pr
+                    resolutions.append({"pr": pr.id, "action": "reject"})
+                elif choice.startswith("a"):
+                    pr.human_disposition = "adr_options"
+                    prs[pr.id] = pr
+                    resolutions.append({"pr": pr.id, "action": "adr_options"})
+                else:
+                    resolutions.append({"pr": pr.id, "action": "skip"})
+
+            PRRegistry.save(root, prs)
+            typer.echo(json.dumps({"resolved": resolutions}))
+    except StateLockTimeout as e:
+        raise _err(str(e)) from e
 
 
 # ---------------------------------------------------------------------------
@@ -768,6 +1325,10 @@ def adr_record(
 
             merged = [p for p in sprint_prs if p.status == PRStatus.MERGED]
             rejected = [p for p in sprint_prs if p.status == PRStatus.REJECTED]
+            deadlocked = [p for p in sprint_prs if p.status == PRStatus.DEADLOCKED]
+            adr_optioned = [
+                p for p in sprint_prs if p.human_disposition == "adr_options"
+            ]
 
             options = [
                 f"{p.author.upper()}: {p.title} (status={p.status.value})"
@@ -783,6 +1344,18 @@ def adr_record(
                     f"  - {p.title} ({p.id}): {p.conflict_details or 'no quorum'}"
                     for p in rejected
                 )
+            if deadlocked:
+                decision_lines.append("Deadlocked (unresolved):")
+                decision_lines.extend(
+                    f"  - {p.title} ({p.id}): open from "
+                    f"{', '.join(p.open_change_requests) or '(no open requesters)'}"
+                    for p in deadlocked
+                )
+            if adr_optioned:
+                decision_lines.append("Human-resolved as ADR options:")
+                decision_lines.extend(
+                    f"  - {p.title} ({p.id})" for p in adr_optioned
+                )
             decision = "\n".join(decision_lines) or "(no decisions recorded)"
 
             signoffs = sorted(
@@ -790,7 +1363,7 @@ def adr_record(
                     r.reviewer
                     for p in merged
                     for r in p.reviews
-                    if r.approved
+                    if r.verdict == Verdict.APPROVE
                 }
             )
 

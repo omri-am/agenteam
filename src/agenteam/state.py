@@ -30,6 +30,27 @@ from typing import Iterator
 from .models import DebateState, PullRequest
 
 
+# Bump this whenever an on-disk schema change is incompatible with the
+# previous format. Old state files trigger a friendly "run bootstrap
+# --reset" error rather than a cryptic Pydantic ValidationError — state is
+# regenerable from ``sprints/*.md`` so there's no migration path.
+STATE_SCHEMA_VERSION = 2
+
+
+class StateSchemaMismatch(ValueError):
+    """On-disk state predates the current ``STATE_SCHEMA_VERSION``."""
+
+    def __init__(self, path: Path, found: object) -> None:
+        self.path = path
+        self.found = found
+        super().__init__(
+            f"state file at {path} has schema_version={found!r} but the "
+            f"current CLI expects {STATE_SCHEMA_VERSION}. State is "
+            "regenerable from sprints/*.md — run 'agenteam bootstrap --reset' "
+            "to wipe and start over."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Path helpers
 # ---------------------------------------------------------------------------
@@ -265,14 +286,26 @@ class PRRegistry:
             raise ValueError(
                 f"PR registry at {path} must be a JSON object, got {type(raw).__name__}"
             )
-        return {pid: PullRequest.model_validate(pr) for pid, pr in raw.items()}
+        version = raw.get("schema_version")
+        if version != STATE_SCHEMA_VERSION:
+            raise StateSchemaMismatch(path, version)
+        prs_block = raw.get("prs", {})
+        if not isinstance(prs_block, dict):
+            raise ValueError(
+                f"PR registry at {path} has invalid 'prs' block: "
+                f"expected object, got {type(prs_block).__name__}"
+            )
+        return {pid: PullRequest.model_validate(pr) for pid, pr in prs_block.items()}
 
     @staticmethod
     def save(root: Path, prs: dict[str, PullRequest]) -> None:
-        serialised = {
-            pid: json.loads(pr.model_dump_json()) for pid, pr in prs.items()
+        wrapped = {
+            "schema_version": STATE_SCHEMA_VERSION,
+            "prs": {
+                pid: json.loads(pr.model_dump_json()) for pid, pr in prs.items()
+            },
         }
-        _atomic_write(_prs_path(root), json.dumps(serialised, indent=2) + "\n")
+        _atomic_write(_prs_path(root), json.dumps(wrapped, indent=2) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -289,19 +322,34 @@ class DebateStore:
         if not path.exists():
             return None
         try:
-            return DebateState.model_validate_json(
-                path.read_text(encoding="utf-8")
-            )
+            raw = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as e:
             raise ValueError(
                 f"corrupt debate state at {path}: {e.msg} (line {e.lineno}, col {e.colno})"
             ) from e
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"debate state at {path} must be a JSON object, got {type(raw).__name__}"
+            )
+        version = raw.get("schema_version")
+        if version != STATE_SCHEMA_VERSION:
+            raise StateSchemaMismatch(path, version)
+        debate_block = raw.get("debate")
+        if not isinstance(debate_block, dict):
+            raise ValueError(
+                f"debate state at {path} missing 'debate' block"
+            )
+        return DebateState.model_validate(debate_block)
 
     @staticmethod
     def save(root: Path, state: DebateState) -> None:
+        wrapped = {
+            "schema_version": STATE_SCHEMA_VERSION,
+            "debate": json.loads(state.model_dump_json()),
+        }
         _atomic_write(
             _debate_path(root, state.sprint_id),
-            state.model_dump_json(indent=2) + "\n",
+            json.dumps(wrapped, indent=2) + "\n",
         )
 
     @staticmethod
