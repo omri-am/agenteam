@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from agensuite.cli import _set_sprint_frontmatter
+from agensuite.wizard import InitAnswers, default_answers
 
 SPRINT = (
     "---\n"
@@ -65,3 +66,20 @@ def test_rejects_unclosed_frontmatter() -> None:
         _set_sprint_frontmatter(
             "---\nid: x\n", rounds=2, quorum=1, participants=["cpo"]
         )
+
+
+def test_init_answers_defaults() -> None:
+    a = InitAnswers(idea="A trading app")
+    assert a.idea == "A trading app"
+    assert a.biases == {}
+    assert a.debate_rounds == 2
+    assert a.approval_quorum == 2
+    assert a.participants == ["cpo", "cto", "cdo", "cco"]
+
+
+def test_default_answers_uses_idea_and_defaults() -> None:
+    a = default_answers("My idea")
+    assert a.idea == "My idea"
+    assert a.biases == {}
+    assert a.debate_rounds == 2
+    assert a.participants == ["cpo", "cto", "cdo", "cco"]
