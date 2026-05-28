@@ -93,4 +93,9 @@ jobs:
           path: dist/
 
       - name: Publish
-        uses: pypa/gh-action-pypi-publish@6733eb7d741f0b11ec6a39b58540dab7590f9b7d # v1.14.0
+        # NOT SHA-pinned on purpose: this is a Docker action whose image is
+        # published to GHCR tagged by RELEASE (e.g. :release-v1, :v1.x), not
+        # by commit SHA. Pinning to a SHA makes the runner pull a nonexistent
+        # image tag → "docker: manifest unknown". `release/v1` is PyPA's
+        # supported, security-maintained ref for this action.
+        uses: pypa/gh-action-pypi-publish@release/v1
