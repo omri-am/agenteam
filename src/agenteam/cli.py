@@ -45,6 +45,7 @@ from .state import (
     DebateStore,
     PRRegistry,
     StateLockTimeout,
+    StateSchemaMismatch,
     clear_stale_lock,
     ensure_dirs,
     state_lock,
@@ -509,6 +510,8 @@ def pr_open(
             DebateStore.save(root, debate)
     except StateLockTimeout as e:
         raise _err(str(e)) from e
+    except StateSchemaMismatch as e:
+        raise _err(str(e)) from e
 
     typer.echo(pr_id)
 
@@ -656,8 +659,13 @@ def pr_comment(
                 round_idx = debate.schedule[
                     min(debate.cursor - 1, len(debate.schedule) - 1)
                 ].round_idx
+            # Derive the Message id from ``review.timestamp`` (not a fresh
+            # ``datetime.now()``) so :func:`_rebuttal_msg_id` can rebuild
+            # the same id from a persisted ReviewComment — without this
+            # the two timestamps diverge and FOLLOWUP's rebuttal_msg_id
+            # points at a non-existent transcript line.
             msg = Message(
-                id=f"msg-{_short_id(id, reviewer, comment, datetime.now(timezone.utc).isoformat())}",
+                id=f"msg-{_short_id(id, reviewer, comment, review.timestamp.isoformat())}",
                 sender=reviewer,
                 recipient=pr.author,
                 msg_type=(
@@ -674,6 +682,8 @@ def pr_comment(
             _extend_schedule_after_comment(debate, pr, phase, verdict)
             DebateStore.save(root, debate)
     except StateLockTimeout as e:
+        raise _err(str(e)) from e
+    except StateSchemaMismatch as e:
         raise _err(str(e)) from e
 
     typer.echo(
@@ -815,6 +825,8 @@ def pr_list(
             prs = PRRegistry.load(root)
     except StateLockTimeout as e:
         raise _err(str(e)) from e
+    except StateSchemaMismatch as e:
+        raise _err(str(e)) from e
 
     rows = sorted(
         (p for p in prs.values() if sprint is None or p.sprint_id == sprint),
@@ -914,6 +926,8 @@ def pr_merge(
             sha = _merge_pr(ctx, prs, id)
             PRRegistry.save(root, prs)
     except StateLockTimeout as e:
+        raise _err(str(e)) from e
+    except StateSchemaMismatch as e:
         raise _err(str(e)) from e
 
     typer.echo(sha)
@@ -1049,34 +1063,44 @@ def debate_next_turn(
             DebateStore.save(root, debate)
 
             if turn is None:
-                # Schedule exhausted but not every PR converged. This is
-                # the "schedule_exhausted" exit — orchestrator should treat
-                # like deadlock if any PR is still open.
+                # Schedule exhausted but not every PR converged. Promote
+                # the stragglers to DEADLOCKED so `human-gate
+                # --resolve-deadlocks` picks them up — otherwise a PR
+                # that's CHANGES_REQUESTED with no further scheduled
+                # turns has no resolution path (review finding #3).
                 done = _termination(sprint_prs, cfg)
                 if done is not None:
                     typer.echo(json.dumps(done))
                     return
+                stragglers = [
+                    p
+                    for p in sprint_prs
+                    if p.status
+                    not in (
+                        PRStatus.MERGED,
+                        PRStatus.REJECTED,
+                        PRStatus.DEADLOCKED,
+                    )
+                    and not _pr_converged(p, cfg)
+                ]
+                for p in stragglers:
+                    p.status = PRStatus.DEADLOCKED
+                    prs[p.id] = p
+                if stragglers:
+                    PRRegistry.save(root, prs)
                 typer.echo(
                     json.dumps(
                         {
                             "done": True,
-                            "reason": "schedule_exhausted",
-                            "open_prs": [
-                                p.id
-                                for p in sprint_prs
-                                if p.status
-                                not in (
-                                    PRStatus.MERGED,
-                                    PRStatus.REJECTED,
-                                    PRStatus.DEADLOCKED,
-                                )
-                                and not _pr_converged(p, cfg)
-                            ],
+                            "reason": "deadlocked",
+                            "deadlocked_prs": [p.id for p in stragglers],
                         }
                     )
                 )
                 return
     except StateLockTimeout as e:
+        raise _err(str(e)) from e
+    except StateSchemaMismatch as e:
         raise _err(str(e)) from e
 
     target_pr = next(p for p in sprint_prs if p.id == turn.target_pr_id)
@@ -1138,6 +1162,8 @@ def debate_tail(
         with state_lock(root):
             debate = DebateStore.load(root, sprint)
     except StateLockTimeout as e:
+        raise _err(str(e)) from e
+    except StateSchemaMismatch as e:
         raise _err(str(e)) from e
 
     if debate is None:
@@ -1297,6 +1323,8 @@ def _resolve_deadlocks_loop(ctx: typer.Context, sprint: str) -> None:
             typer.echo(json.dumps({"resolved": resolutions}))
     except StateLockTimeout as e:
         raise _err(str(e)) from e
+    except StateSchemaMismatch as e:
+        raise _err(str(e)) from e
 
 
 # ---------------------------------------------------------------------------
@@ -1408,6 +1436,8 @@ def adr_record(
             except GitCommandError as e:
                 raise _err(f"failed to commit ADR: {e}") from e
     except StateLockTimeout as e:
+        raise _err(str(e)) from e
+    except StateSchemaMismatch as e:
         raise _err(str(e)) from e
 
     typer.echo(json.dumps({"adr_id": adr_id, "sha": sha}))
