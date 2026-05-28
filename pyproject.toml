@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agensuite"
-version = "0.1.0"
+# Pre-1.0 alpha while WIP. `pip install agensuite` skips pre-releases by
+# default, so an accidental early publish never reaches normal users
+# (they'd need `--pre`). Bump to "0.1.0" for the first stable release.
+version = "0.1.0a0"
 description = "Agent-native C-suite template: a coding agent orchestrates a turn-based debate between role subagents via a thin CLI."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,6 +17,11 @@ dependencies = [
     "typer>=0.12",
     "pyyaml>=6",
 ]
+
+[project.urls]
+Homepage = "https://github.com/omri-am/agenteam"
+Repository = "https://github.com/omri-am/agenteam"
+Issues = "https://github.com/omri-am/agenteam/issues"
 
 [project.optional-dependencies]
 dev = [
