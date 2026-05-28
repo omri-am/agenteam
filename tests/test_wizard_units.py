@@ -30,7 +30,7 @@ def test_updates_three_fields_and_preserves_body() -> None:
     out = _set_sprint_frontmatter(
         SPRINT, rounds=3, quorum=1, participants=["cpo", "cto"]
     )
-    front, body = out.split("---\n", 2)[1], out.split("---\n", 2)[2]
+    _, front, body = out.split("---\n", 2)
     meta = yaml.safe_load(front)
     assert meta["debate_rounds"] == 3
     assert meta["approval_quorum"] == 1
@@ -58,3 +58,10 @@ def test_rejects_quorum_below_one() -> None:
 def test_rejects_rounds_below_one() -> None:
     with pytest.raises(ValueError, match="rounds"):
         _set_sprint_frontmatter(SPRINT, rounds=0, quorum=1, participants=["cpo"])
+
+
+def test_rejects_unclosed_frontmatter() -> None:
+    with pytest.raises(ValueError, match="not closed"):
+        _set_sprint_frontmatter(
+            "---\nid: x\n", rounds=2, quorum=1, participants=["cpo"]
+        )

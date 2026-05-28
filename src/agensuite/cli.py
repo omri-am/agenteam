@@ -1499,7 +1499,10 @@ def _set_sprint_frontmatter(
 
     if not content.startswith("---\n"):
         raise ValueError("sprint file has no YAML frontmatter")
-    _, front, body = content.split("---\n", 2)
+    parts = content.split("---\n", 2)
+    if len(parts) < 3:
+        raise ValueError("sprint file frontmatter is not closed (missing closing '---')")
+    _, front, body = parts
 
     meta = yaml.safe_load(front) or {}
     meta["debate_rounds"] = rounds
