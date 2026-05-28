@@ -8,6 +8,7 @@ unit-testable.
 
 from __future__ import annotations
 
+import questionary
 from pydantic import BaseModel, Field
 
 # Spoke roles the user can tune. CEO is included for biases but is never a
@@ -38,3 +39,77 @@ class InitAnswers(BaseModel):
 def default_answers(idea: str) -> InitAnswers:
     """Non-interactive answers: the given idea plus every default."""
     return InitAnswers(idea=idea)
+
+
+def _ask_idea() -> str:
+    while True:
+        idea = (questionary.text("Describe your startup in one line:").ask() or "").strip()
+        if idea:
+            return idea
+        questionary.print("  idea cannot be empty.", style="fg:red")
+
+
+def _ask_biases() -> dict[str, list[str]]:
+    biases: dict[str, list[str]] = {}
+    for role in PERSONAS:
+        tune = questionary.confirm(
+            f"Tune the {role.upper()} ({PERSONA_BLURBS[role]})?",
+            default=False,
+        ).ask()
+        if not tune:
+            continue
+        lines: list[str] = []
+        questionary.print(
+            "  Enter one bias per line; blank line when done.",
+            style="fg:cyan",
+        )
+        while True:
+            line = (questionary.text(f"  {role.upper()} bias:").ask() or "").strip()
+            if not line:
+                break
+            lines.append(line)
+        if lines:
+            biases[role] = lines
+    return biases
+
+
+def _ask_sprint() -> tuple[int, int, list[str]]:
+    rounds = int(
+        questionary.text(
+            "Debate rounds for sprint 1:",
+            default="2",
+            validate=lambda v: v.isdigit() and int(v) >= 1,
+        ).ask()
+    )
+    participants = questionary.checkbox(
+        "Sprint-1 participants:",
+        choices=[questionary.Choice(s.upper(), value=s, checked=True) for s in SPOKES],
+    ).ask() or list(SPOKES)
+    quorum = int(
+        questionary.text(
+            f"Approval quorum (1..{len(participants)}):",
+            default="2",
+            validate=lambda v, n=len(participants): v.isdigit() and 1 <= int(v) <= n,
+        ).ask()
+    )
+    return rounds, quorum, participants
+
+
+def run_init_wizard() -> InitAnswers:
+    """Drive the interactive flow. Call only when stdin is a TTY."""
+    questionary.print("agensuite setup · Step 1/3 · Your idea", style="bold")
+    idea = _ask_idea()
+
+    questionary.print("Step 2/3 · Persona biases", style="bold")
+    biases = _ask_biases()
+
+    questionary.print("Step 3/3 · Sprint 1 config", style="bold")
+    rounds, quorum, participants = _ask_sprint()
+
+    return InitAnswers(
+        idea=idea,
+        biases=biases,
+        debate_rounds=rounds,
+        approval_quorum=quorum,
+        participants=participants,
+    )
