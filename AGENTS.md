@@ -48,10 +48,13 @@ You play the **CEO**. You will:
 |------------------------------------------|-----------------------------------|-------------|
 | Persona, biases, deliverable schema      | `.claude/agents/{role}.md`        | LLM only    |
 | Branch / worktree / commit / PR / merge  | `agenteam` CLI                    | Shell only  |
-| Debate turn schedule (deterministic)     | `DebateState.schedule` in CLI     | Shell only  |
+| Debate turn schedule (append-only)       | `DebateState.schedule` in CLI     | Shell only  |
+| Turn phase (REVIEW / REBUTTAL / FOLLOWUP)| `DebateTurn.phase` in CLI         | Shell only  |
+| Verdict-based termination                | `agenteam debate next-turn`       | Shell only  |
 | ADR scaffolding                          | `agenteam adr record`             | Shell only  |
 | Sprint config (YAML frontmatter + body)  | `sprints/sprint-{n}.md`           | Both        |
 | Next-sprint authoring                    | CEO subagent post-ADR             | LLM only    |
+| Deadlock resolution                      | `agenteam human-gate --resolve-deadlocks` | Both |
 
 If you find yourself paraphrasing persona text, stop — spawn the
 subagent instead. If you find yourself touching `state/*.json` or
@@ -125,28 +128,52 @@ for role in cfg.participants:
     pr_id = agenteam pr open --branch {branch} --author {role} \
         --title "{ROLE}: {cfg.title}" --files <paths> --sprint {sprint_id}
 
-# --- debate (turn-based; schedule is CLI-deterministic) ---
+# --- debate (verdict-terminated; bounded threaded rebuttals) ---
+# Termination is verdict-based: the schedule is an UPPER BOUND. The debate
+# exits the moment every PR is either terminal (MERGED / REJECTED /
+# DEADLOCKED) or meets quorum with no open change requests. Each turn
+# carries a `phase` (REVIEW / REBUTTAL / FOLLOWUP) — pick the prompt
+# template accordingly.
+last_done = None
 while True:
     turn = json.loads(agenteam debate next-turn --sprint {sprint_id})
-    if turn.get("done"): break
+    if turn.get("done"):
+        last_done = turn
+        break
     tail = agenteam debate tail --sprint {sprint_id} --window 6
 
-    spawn_subagent(
-        subagent_type = turn.speaker,                 # role inferred by CLI
-        prompt        = f"Review PR {turn.pr_id}. Recent debate: {tail}. "
-                        f"Decide: approve or request changes.",
-    )
+    if turn.phase == "REVIEW":
+        prompt = (f"Review PR {turn.pr_id}. Recent debate: {tail}. "
+                  f"Verdict: APPROVE | REQUEST_CHANGES | COMMENT.")
+    elif turn.phase == "REBUTTAL":
+        prompt = (f"You are the author of PR {turn.pr_id}. Address every "
+                  f"change request collectively: {turn.open_change_requests}. "
+                  f"Recent debate: {tail}.")
+    elif turn.phase == "FOLLOWUP":
+        prompt = (f"You requested changes on PR {turn.pr_id}. The author's "
+                  f"rebuttal (msg id={turn.rebuttal_msg_id}) is in {tail}. "
+                  f"Stand (REQUEST_CHANGES) or withdraw (APPROVE / COMMENT).")
+
+    spawn_subagent(subagent_type=turn.speaker, prompt=prompt)
     <subagent returns a short critique + verdict>
 
+    extra = []
+    if turn.phase == "FOLLOWUP":
+        extra = ["--parent-turn-idx", str(turn.parent_turn_idx)]
     agenteam pr comment --id {turn.pr_id} --reviewer {turn.speaker} \
-        --comment "<critique>" [--approve]
+        --verdict <APPROVE|REQUEST_CHANGES|COMMENT> --phase {turn.phase} \
+        --comment "<critique>" [{extra}]
 
-# --- human gate ---
+# --- deadlock resolution (only if any reviewer stood at FOLLOWUP) ---
+if last_done.get("reason") == "deadlocked":
+    agenteam human-gate --sprint {sprint_id} --resolve-deadlocks
+
+# --- human gate (banner / pause) ---
 agenteam human-gate --message "Inspect debate for {sprint_id}"
 
 # --- merge + ADR ---
 for pr in agenteam pr list --sprint {sprint_id}:
-    if pr meets quorum:
+    if pr meets quorum and has no open change requests:
         agenteam pr merge --id {pr.id}     # marks REJECTED on conflict
 
 # ADR composition is delegated to the CEO subagent for narrative,
@@ -165,9 +192,13 @@ spawn_subagent(subagent_type = "ceo",
 ```
 
 All CLI commands return non-zero on error so you can detect failures from
-the shell exit code. The `DebateState.schedule` is **pre-computed at
-sprint kickoff** and is the single source of truth for "whose turn is
-it" — never derive turn order from the LLM side.
+the shell exit code. `agenteam debate next-turn` is the single source of
+truth for **the next required turn, derived from current PR state** —
+never derive turn order from the LLM side. The `DebateState.schedule` is
+seeded at sprint kickoff and extended in place (append-only) as
+reviewers post `REQUEST_CHANGES` (which appends one REBUTTAL slot) or
+authors post a REBUTTAL (which appends one FOLLOWUP slot per open
+change-requester).
 
 ## 5. Native Subagent Spawning — Platform Hints
 
@@ -202,7 +233,10 @@ The CLI contract is canonical. Native subagent dispatch is platform-specific:
   worktree (`workspace/wt/feat__{role}__{slug}/`). The CEO (you) merges
   into `main` via `agenteam pr merge`.
 - **Reviewers never review their own PR.** The CLI enforces this — a
-  `pr comment` where `reviewer == pr.author` exits non-zero.
+  `pr comment --phase REVIEW` or `--phase FOLLOWUP` where
+  `reviewer == pr.author` exits non-zero. The one exception is
+  `--phase REBUTTAL`, which *requires* `reviewer == pr.author` and is
+  the only path by which the author posts to their own PR.
 - **Prerequisite files must be read from `main` first.** Any sprint
   whose YAML frontmatter declares `prerequisite_files` requires the
   orchestrator to run `agenteam read --branch <b> --path <p>` for each
@@ -215,10 +249,19 @@ The CLI contract is canonical. Native subagent dispatch is platform-specific:
 - **Persona fidelity.** Don't paraphrase `.claude/agents/{role}.md`
   when spawning a subagent. Either the platform loads it verbatim or
   you read+pass the full body verbatim.
-- **Deterministic debate schedule.** Turn order comes from
-  `agenteam debate next-turn`, never from the LLM. The CLI's
-  `DebateState.schedule` is pre-computed at sprint kickoff and is
-  immutable for the sprint's lifetime.
+- **Append-only debate schedule.** Turn order comes from
+  `agenteam debate next-turn`, never from the LLM. Consumed slots and
+  their ordering are immutable; REBUTTAL slots are appended when a
+  reviewer posts `REQUEST_CHANGES`, and FOLLOWUP slots are appended once
+  the author's REBUTTAL is consumed. The schedule itself is therefore an
+  upper bound — `next-turn` returns `{"done": true, ...}` as soon as
+  every PR is terminal (MERGED / REJECTED / DEADLOCKED) or has quorum
+  with no open change requests.
+- **Verdict-based merge predicate.** `agenteam pr merge` refuses a PR
+  that is `DEADLOCKED`, that lacks quorum, or that has any open
+  `REQUEST_CHANGES` from a non-author reviewer. The only path that can
+  merge a `DEADLOCKED` PR is `agenteam human-gate --resolve-deadlocks`,
+  which is an explicit human override on the record.
 - **CEO owns the roadmap, not the repo.** The next-sprint blueprint
   is authored by the CEO subagent only after the current sprint's ADR
   is recorded; no spoke writes `sprints/*.md`.
@@ -233,15 +276,23 @@ agenteam branch create <name> [--base main]
 agenteam read --branch <b> --path <p>
 agenteam commit --branch <b> --author <a> --message <m> --files <f> [--files ...]
 agenteam pr open --branch <b> --author <a> --title <t> --sprint <s> [--files ...] [--description ...]
-agenteam pr comment --id <pr> --reviewer <r> --comment <c> [--approve] [--file <f>]
+agenteam pr comment --id <pr> --reviewer <r> --comment <c> \
+    [--verdict APPROVE|REQUEST_CHANGES|COMMENT] \
+    [--phase REVIEW|REBUTTAL|FOLLOWUP] \
+    [--parent-turn-idx <n>]            # required for FOLLOWUP
+    [--approve]                        # DEPRECATED — alias for --verdict APPROVE
+    [--file <f>]
 agenteam pr list [--sprint <s>]
-agenteam pr merge --id <pr>
-agenteam debate next-turn --sprint <s>
+agenteam pr merge --id <pr>            # refuses DEADLOCKED + open change requests
+agenteam debate next-turn --sprint <s> # returns turn JSON with phase/prompt_hint
 agenteam debate tail --sprint <s> [--window 6]
 agenteam human-gate --message <msg>
+agenteam human-gate --sprint <s> --resolve-deadlocks  # walks DEADLOCKED PRs
 agenteam adr record --sprint <s>
 ```
 
-The CLI surface, the Pydantic schemas in `src/agenteam/models.py`, and
-the pre-computed `DebateState.schedule` are **invariant under this
-hybrid refactor** — only the persona-spawning mechanism changed.
+The Pydantic schemas in `src/agenteam/models.py` and the persisted state
+shape under `state/` carry a `schema_version` stamp — bumping it requires
+an ADR. The bounded-rebuttal protocol (verdict + phase + append-only
+schedule + verdict-based termination + human-gated deadlocks) is the
+current contract; any change to it is a contract change, not a refactor.

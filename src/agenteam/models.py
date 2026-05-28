@@ -39,9 +39,35 @@ class PRStatus(str, Enum):
 
     OPEN = "OPEN"
     UNDER_REVIEW = "UNDER_REVIEW"
-    LOCKED = "LOCKED"
+    CHANGES_REQUESTED = "CHANGES_REQUESTED"
+    DEADLOCKED = "DEADLOCKED"
     MERGED = "MERGED"
     REJECTED = "REJECTED"
+
+
+class Verdict(str, Enum):
+    """Reviewer verdict on a PR. ``APPROVE`` is the only verdict that
+    counts toward the merge quorum; ``REQUEST_CHANGES`` blocks merge until
+    withdrawn; ``COMMENT`` is non-binding."""
+
+    APPROVE = "APPROVE"
+    REQUEST_CHANGES = "REQUEST_CHANGES"
+    COMMENT = "COMMENT"
+
+
+class TurnPhase(str, Enum):
+    """Which beat of the bounded threaded rebuttal protocol a turn belongs to.
+
+    REVIEW: initial reviewer verdict on the PR.
+    REBUTTAL: author's single collective response addressing all
+        change-requesters at once. Author-only.
+    FOLLOWUP: each change-requester's single stand-or-withdraw beat after
+        the rebuttal. Closes the thread either way.
+    """
+
+    REVIEW = "REVIEW"
+    REBUTTAL = "REBUTTAL"
+    FOLLOWUP = "FOLLOWUP"
 
 
 # ---------------------------------------------------------------------------
@@ -78,15 +104,48 @@ class Commit(BaseModel):
 
 
 class ReviewComment(BaseModel):
-    """A reviewer's note on a PR. ``approved=True`` counts toward the quorum."""
+    """A reviewer's note on a PR.
+
+    ``verdict == APPROVE`` counts toward the merge quorum. The latest
+    verdict per reviewer is what's consulted (see
+    :py:meth:`PullRequest.approval_count`) so a reviewer can withdraw a
+    change request by posting a fresh APPROVE or COMMENT.
+
+    ``phase`` records which beat of the rebuttal protocol the comment was
+    posted under (initial REVIEW, the author's REBUTTAL, or a reviewer's
+    closing FOLLOWUP). Phase preconditions are enforced by the CLI, not
+    here.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     reviewer: str
     file: str | None = None
     comment: str
-    approved: bool = False
+    verdict: Verdict = Verdict.COMMENT
+    phase: TurnPhase = TurnPhase.REVIEW
     timestamp: datetime = Field(default_factory=_utcnow)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_approved(cls, data):  # type: ignore[no-untyped-def]
+        """Map legacy ``{"approved": true/false}`` payloads onto ``verdict``.
+
+        Kept so unit tests that hand-construct old-shaped JSON keep working;
+        on-disk state from a previous schema version is rejected up-front
+        by ``state.py`` so it never reaches this validator.
+        """
+        if not isinstance(data, dict):
+            return data
+        if "approved" not in data:
+            return data
+        out = dict(data)
+        legacy = out.pop("approved")
+        out.setdefault(
+            "verdict",
+            Verdict.APPROVE.value if legacy else Verdict.COMMENT.value,
+        )
+        return out
 
 
 class PullRequest(BaseModel):
@@ -105,20 +164,54 @@ class PullRequest(BaseModel):
     reviews: list[ReviewComment] = Field(default_factory=list)
     sprint_id: str
     conflict_details: str | None = None
+    human_disposition: str | None = None
     created_at: datetime = Field(default_factory=_utcnow)
+
+    def _latest_verdicts(self) -> dict[str, Verdict]:
+        """Per-reviewer map: reviewer -> latest non-rebuttal verdict.
+
+        Rebuttal comments are posted by the author and don't represent a
+        review verdict, so they're excluded from the tally.
+        """
+        latest: dict[str, Verdict] = {}
+        for r in self.reviews:
+            if r.phase == TurnPhase.REBUTTAL:
+                continue
+            latest[r.reviewer] = r.verdict
+        return latest
 
     @property
     def approval_count(self) -> int:
-        """Count distinct reviewers whose *latest* review approved.
+        """Count distinct reviewers whose *latest* verdict is ``APPROVE``.
 
-        A reviewer who first rejects then approves (or vice-versa) only ever
-        contributes their most recent verdict — so the quorum can't be gamed
-        by leaving stale approvals on a rewritten PR.
+        Latest-wins: a reviewer who first requests changes and then approves
+        contributes one approval and zero open change requests. This is what
+        lets the FOLLOWUP "withdraw" beat naturally clear a prior
+        ``REQUEST_CHANGES``.
         """
-        latest: dict[str, bool] = {}
+        return sum(
+            1 for v in self._latest_verdicts().values() if v == Verdict.APPROVE
+        )
+
+    @property
+    def open_change_requests(self) -> list[str]:
+        """Reviewers whose latest verdict is ``REQUEST_CHANGES``.
+
+        These reviewers block merge (see ``cli.pr_merge``) until they
+        withdraw via a FOLLOWUP that flips the verdict to ``APPROVE`` or
+        ``COMMENT``. Order is insertion order over ``self.reviews``.
+        """
+        latest = self._latest_verdicts()
+        seen: list[str] = []
         for r in self.reviews:
-            latest[r.reviewer] = r.approved
-        return sum(1 for v in latest.values() if v)
+            if r.phase == TurnPhase.REBUTTAL:
+                continue
+            if (
+                latest.get(r.reviewer) == Verdict.REQUEST_CHANGES
+                and r.reviewer not in seen
+            ):
+                seen.append(r.reviewer)
+        return seen
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +307,7 @@ class SprintConfig(BaseModel):
     prerequisite_files: list[SprintPrerequisite] = Field(default_factory=list)
     debate_rounds: int = Field(default=1, ge=1)
     approval_quorum: int = Field(default=1, ge=1)
+    rebuttal_depth: int = Field(default=1, ge=1, le=3)
     body: str = ""
 
     @model_validator(mode="after")
@@ -239,13 +333,21 @@ class SprintConfig(BaseModel):
 
 
 class DebateTurn(BaseModel):
-    """A scheduled slot: ``speaker`` reviews ``target_pr_id`` in ``round_idx``."""
+    """A scheduled slot: ``speaker`` reviews ``target_pr_id`` in ``round_idx``.
+
+    ``phase`` distinguishes initial reviews from rebuttal / follow-up beats
+    appended in response to verdict events. ``parent_turn_idx`` points
+    follow-up slots back at the rebuttal they answer, so the orchestrator
+    can hand the subagent the exact rebuttal message.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     round_idx: int
     speaker: str
     target_pr_id: str
+    phase: TurnPhase = TurnPhase.REVIEW
+    parent_turn_idx: int | None = None
 
 
 class DebateState(BaseModel):

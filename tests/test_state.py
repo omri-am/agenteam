@@ -14,6 +14,7 @@ from agenteam.state import (
     DebateStore,
     PRRegistry,
     StateLockTimeout,
+    StateSchemaMismatch,
     _atomic_write,
     clear_stale_lock,
     ensure_dirs,
@@ -108,6 +109,18 @@ class TestPRRegistry:
         (tmp_path / "state" / "prs.json").write_text("{ bogus")
         with pytest.raises(ValueError, match="corrupt"):
             PRRegistry.load(tmp_path)
+
+    def test_old_schema_rejected_with_actionable_message(
+        self, tmp_path: Path
+    ) -> None:
+        """A pre-schema_version-2 file directs the user to ``bootstrap --reset``."""
+        ensure_dirs(tmp_path)
+        legacy = '{"pr-1": {"id": "pr-1", "title": "t", "branch": "b", '\
+                 '"author": "a", "sprint_id": "s"}}'
+        (tmp_path / "state" / "prs.json").write_text(legacy)
+        with pytest.raises(StateSchemaMismatch) as exc:
+            PRRegistry.load(tmp_path)
+        assert "bootstrap --reset" in str(exc.value)
 
 
 class TestDebateStore:

@@ -97,21 +97,27 @@ class TestEndToEnd:
         pr_a = self._open_pr(cli, project_root, "a", "feat/a/x", "fa.md")
         pr_b = self._open_pr(cli, project_root, "b", "feat/b/x", "fb.md")
 
-        # Approve each PR by one non-author (quorum=1).
-        cli("pr", "comment", "--id", pr_a, "--reviewer", "b",
-            "--comment", "lgtm", "--approve")
-        cli("pr", "comment", "--id", pr_b, "--reviewer", "a",
-            "--comment", "lgtm", "--approve")
-
-        # Drain debate schedule. 2 PRs * 2 non-author reviewers * 2 rounds = 8.
+        # Drive one approval per PR through the debate so verdict-based
+        # termination fires only after each PR has at least one APPROVE.
         consumed = 0
+        last_done: dict = {}
         while True:
             out = json.loads(cli("debate", "next-turn", "--sprint", "s").stdout)
             if out.get("done"):
+                last_done = out
                 break
+            cli("pr", "comment",
+                "--id", out["pr_id"],
+                "--reviewer", out["speaker"],
+                "--comment", "lgtm",
+                "--verdict", "APPROVE",
+                "--phase", out["phase"])
             consumed += 1
             assert consumed < 20
-        assert consumed == 8
+        # Under verdict termination the loop ends as soon as every PR is
+        # quorum-met; the pre-computed schedule is an upper bound.
+        assert last_done == {"done": True, "reason": "quorum_met"}
+        assert 2 <= consumed < 8
 
         cli("pr", "merge", "--id", pr_a)
         cli("pr", "merge", "--id", pr_b)
@@ -126,10 +132,25 @@ class TestEndToEnd:
     def test_self_review_rejected(self, cli, project_root: Path) -> None:
         cli("bootstrap")
         pr_a = self._open_pr(cli, project_root, "a", "feat/a/x", "fa.md")
+        # REVIEW phase: author cannot review own PR.
         p = cli("pr", "comment", "--id", pr_a, "--reviewer", "a",
                 "--comment", "self", expect_ok=False)
         assert p.returncode == 1
         assert "cannot review own PR" in p.stderr
+
+    def test_self_rebuttal_allowed(self, cli, project_root: Path) -> None:
+        """REBUTTAL phase is the one case where reviewer == pr.author."""
+        cli("bootstrap")
+        pr_a = self._open_pr(cli, project_root, "a", "feat/a/x", "fa.md")
+        # Reviewer b requests changes → REBUTTAL slot appended.
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "b",
+            "--comment", "need fix", "--verdict", "REQUEST_CHANGES",
+            "--phase", "REVIEW")
+        # Author posts the rebuttal.
+        p = cli("pr", "comment", "--id", pr_a, "--reviewer", "a",
+                "--comment", "addressed", "--verdict", "COMMENT",
+                "--phase", "REBUTTAL")
+        assert "REBUTTAL" in p.stdout
 
     def test_non_participant_rejected(self, cli, project_root: Path) -> None:
         cli("bootstrap")
@@ -201,20 +222,21 @@ class TestMidDebatePR:
         pr_b = self._open_pr(cli, project_root, "b", "feat/b/x", "fb.md")
 
         debate_path = project_root / "state" / "debates" / "s.json"
-        before = json.loads(debate_path.read_text())
+        # State is wrapped in {"schema_version": N, "debate": {...}}
+        before = json.loads(debate_path.read_text())["debate"]
         initial_len = len(before["schedule"])
         assert initial_len == 8  # 2 PRs * 2 reviewers * 2 rounds
 
         # Consume two turns
         for _ in range(2):
             json.loads(cli("debate", "next-turn", "--sprint", "s").stdout)
-        mid = json.loads(debate_path.read_text())
+        mid = json.loads(debate_path.read_text())["debate"]
         assert mid["cursor"] == 2
         prefix = mid["schedule"][:2]
 
         # Open PR-C mid-debate
         pr_c = self._open_pr(cli, project_root, "c", "feat/c/x", "fc.md")
-        after = json.loads(debate_path.read_text())
+        after = json.loads(debate_path.read_text())["debate"]
 
         # Invariants:
         assert after["cursor"] == 2, "cursor must be preserved"
@@ -391,3 +413,369 @@ class TestChiefCustomize:
         )
         assert p.returncode == 0, p.stderr
         assert "GPU inference path" in (project / ".claude" / "agents" / "cto.md").read_text()
+
+
+class TestDebateRebuttalLoop:
+    """End-to-end coverage of the bounded threaded rebuttal protocol."""
+
+    def _open_pr(self, cli, project_root: Path, role: str, br: str, path: str) -> str:
+        cli("branch", "create", br)
+        slug = br.replace("/", "__")
+        f = project_root / "workspace" / "wt" / slug / path
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(f"draft by {role}\n")
+        cli("commit", "--branch", br, "--author", role,
+            "--message", f"{role} draft", "--files", path)
+        return cli("pr", "open", "--branch", br, "--author", role,
+                   "--title", f"{role}: t", "--sprint", "s",
+                   "--files", path).stdout.strip()
+
+    def _schedule(self, project_root: Path) -> list[dict]:
+        debate = json.loads(
+            (project_root / "state" / "debates" / "s.json").read_text()
+        )["debate"]
+        return debate["schedule"]
+
+    def test_request_changes_appends_rebuttal_slot(
+        self, cli, project_root: Path
+    ) -> None:
+        cli("bootstrap")
+        pr_a = self._open_pr(cli, project_root, "a", "feat/a/x", "fa.md")
+        self._open_pr(cli, project_root, "b", "feat/b/x", "fb.md")
+
+        before = self._schedule(project_root)
+        assert not any(t["phase"] == "REBUTTAL" for t in before), \
+            "base schedule must contain only REVIEW slots"
+
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "b",
+            "--comment", "needs fix", "--verdict", "REQUEST_CHANGES",
+            "--phase", "REVIEW")
+
+        after = self._schedule(project_root)
+        rebuttals = [t for t in after if t["phase"] == "REBUTTAL"]
+        assert len(rebuttals) == 1
+        assert rebuttals[0]["speaker"] == "a"
+        assert rebuttals[0]["target_pr_id"] == pr_a
+
+    def test_rebuttal_then_followup_withdraw_merges(
+        self, cli, project_root: Path
+    ) -> None:
+        cli("bootstrap")
+        pr_a = self._open_pr(cli, project_root, "a", "feat/a/x", "fa.md")
+        self._open_pr(cli, project_root, "b", "feat/b/x", "fb.md")
+
+        # b requests changes on pr_a
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "b",
+            "--comment", "needs fix", "--verdict", "REQUEST_CHANGES",
+            "--phase", "REVIEW")
+        # c also approves pr_a (helps quorum once b withdraws)
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "c",
+            "--comment", "lgtm", "--verdict", "APPROVE",
+            "--phase", "REVIEW")
+        # author rebuts collectively → FOLLOWUP slot for b appended
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "a",
+            "--comment", "addressed in commit X", "--verdict", "COMMENT",
+            "--phase", "REBUTTAL")
+        sched = self._schedule(project_root)
+        followups = [t for t in sched if t["phase"] == "FOLLOWUP"]
+        assert len(followups) == 1
+        assert followups[0]["speaker"] == "b"
+        rebuttal_idx = next(i for i, t in enumerate(sched) if t["phase"] == "REBUTTAL")
+        assert followups[0]["parent_turn_idx"] == rebuttal_idx
+
+        # b withdraws — verdict flips to APPROVE
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "b",
+            "--comment", "satisfied", "--verdict", "APPROVE",
+            "--phase", "FOLLOWUP",
+            "--parent-turn-idx", str(rebuttal_idx))
+
+        # Merge predicate now passes: 2 approvals, no open change requests.
+        cli("pr", "merge", "--id", pr_a)
+
+    def test_followup_stand_yields_deadlocked(
+        self, cli, project_root: Path
+    ) -> None:
+        cli("bootstrap")
+        pr_a = self._open_pr(cli, project_root, "a", "feat/a/x", "fa.md")
+        self._open_pr(cli, project_root, "b", "feat/b/x", "fb.md")
+
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "b",
+            "--comment", "blocker", "--verdict", "REQUEST_CHANGES",
+            "--phase", "REVIEW")
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "a",
+            "--comment", "see commit X", "--verdict", "COMMENT",
+            "--phase", "REBUTTAL")
+        sched = self._schedule(project_root)
+        rebuttal_idx = next(i for i, t in enumerate(sched) if t["phase"] == "REBUTTAL")
+
+        # b stands — verdict stays REQUEST_CHANGES via FOLLOWUP
+        out = cli("pr", "comment", "--id", pr_a, "--reviewer", "b",
+                  "--comment", "still blocked", "--verdict", "REQUEST_CHANGES",
+                  "--phase", "FOLLOWUP",
+                  "--parent-turn-idx", str(rebuttal_idx))
+        payload = json.loads(out.stdout)
+        assert payload["status"] == "DEADLOCKED"
+
+        # pr merge refuses on the DEADLOCKED guard.
+        p = cli("pr", "merge", "--id", pr_a, expect_ok=False)
+        assert p.returncode == 1
+        assert "DEADLOCKED" in p.stderr
+        assert "human-gate" in p.stderr
+
+    def test_quorum_with_open_changes_blocks_merge(
+        self, cli, project_root: Path
+    ) -> None:
+        """quorum >= 1 but an open REQUEST_CHANGES still blocks merge."""
+        cli("bootstrap")
+        pr_a = self._open_pr(cli, project_root, "a", "feat/a/x", "fa.md")
+
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "b",
+            "--comment", "lgtm", "--verdict", "APPROVE", "--phase", "REVIEW")
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "c",
+            "--comment", "blocker", "--verdict", "REQUEST_CHANGES",
+            "--phase", "REVIEW")
+
+        p = cli("pr", "merge", "--id", pr_a, expect_ok=False)
+        assert p.returncode == 1
+        assert "open change request" in p.stderr
+        assert "c" in p.stderr
+
+    def test_early_termination_on_unanimous_approval(
+        self, cli, project_root: Path
+    ) -> None:
+        """Schedule is upper bound — debate exits the moment every PR converges."""
+        cli("bootstrap")
+        pr_a = self._open_pr(cli, project_root, "a", "feat/a/x", "fa.md")
+        pr_b = self._open_pr(cli, project_root, "b", "feat/b/x", "fb.md")
+
+        # One approval per PR is enough (quorum=1).
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "b",
+            "--comment", "lgtm", "--verdict", "APPROVE", "--phase", "REVIEW")
+        cli("pr", "comment", "--id", pr_b, "--reviewer", "a",
+            "--comment", "lgtm", "--verdict", "APPROVE", "--phase", "REVIEW")
+
+        out = json.loads(cli("debate", "next-turn", "--sprint", "s").stdout)
+        assert out == {"done": True, "reason": "quorum_met"}
+
+
+class TestHumanGateResolveDeadlocks:
+    def _open_pr(self, cli, project_root: Path, role: str, br: str, path: str) -> str:
+        cli("branch", "create", br)
+        slug = br.replace("/", "__")
+        f = project_root / "workspace" / "wt" / slug / path
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(f"draft by {role}\n")
+        cli("commit", "--branch", br, "--author", role,
+            "--message", f"{role} draft", "--files", path)
+        return cli("pr", "open", "--branch", br, "--author", role,
+                   "--title", f"{role}: t", "--sprint", "s",
+                   "--files", path).stdout.strip()
+
+    def _drive_to_deadlock(self, cli, project_root: Path) -> str:
+        cli("bootstrap")
+        pr_a = self._open_pr(cli, project_root, "a", "feat/a/x", "fa.md")
+        # quorum=1 + b approves so the merge predicate would pass except
+        # for c's outstanding REQUEST_CHANGES → forces the DEADLOCKED path.
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "b",
+            "--comment", "lgtm", "--verdict", "APPROVE", "--phase", "REVIEW")
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "c",
+            "--comment", "blocker", "--verdict", "REQUEST_CHANGES",
+            "--phase", "REVIEW")
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "a",
+            "--comment", "see commit X", "--verdict", "COMMENT",
+            "--phase", "REBUTTAL")
+        debate = json.loads(
+            (project_root / "state" / "debates" / "s.json").read_text()
+        )["debate"]
+        rebuttal_idx = next(
+            i for i, t in enumerate(debate["schedule"]) if t["phase"] == "REBUTTAL"
+        )
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "c",
+            "--comment", "still blocked", "--verdict", "REQUEST_CHANGES",
+            "--phase", "FOLLOWUP", "--parent-turn-idx", str(rebuttal_idx))
+        return pr_a
+
+    def test_merge_choice_resolves_deadlock(
+        self, cli, project_root: Path, cli_env: dict[str, str]
+    ) -> None:
+        pr_a = self._drive_to_deadlock(cli, project_root)
+
+        # Drive --resolve-deadlocks with stdin "m\n" so the human picks merge.
+        p = subprocess.run(
+            [sys.executable, "-m", "agenteam.cli", "human-gate",
+             "--sprint", "s", "--resolve-deadlocks"],
+            cwd=str(project_root),
+            env=cli_env,
+            input="m\n",
+            capture_output=True,
+            text=True,
+        )
+        assert p.returncode == 0, p.stderr
+        # Parse the trailing JSON line (other lines are the human-readable banner).
+        json_line = next(
+            line for line in reversed(p.stdout.strip().splitlines())
+            if line.strip().startswith("{")
+        )
+        result = json.loads(json_line)
+        assert result["resolved"][0]["pr"] == pr_a
+        assert result["resolved"][0]["action"] == "merge"
+
+    def test_reject_choice_marks_pr_rejected(
+        self, cli, project_root: Path, cli_env: dict[str, str]
+    ) -> None:
+        pr_a = self._drive_to_deadlock(cli, project_root)
+        p = subprocess.run(
+            [sys.executable, "-m", "agenteam.cli", "human-gate",
+             "--sprint", "s", "--resolve-deadlocks"],
+            cwd=str(project_root),
+            env=cli_env,
+            input="r\n",
+            capture_output=True,
+            text=True,
+        )
+        assert p.returncode == 0, p.stderr
+        # Subsequent pr merge must fail since PR was rejected.
+        p2 = cli("pr", "merge", "--id", pr_a, expect_ok=False)
+        assert p2.returncode == 1
+        assert "REJECTED" in p2.stderr
+
+    def test_no_deadlocks_returns_empty(
+        self, cli, project_root: Path
+    ) -> None:
+        cli("bootstrap")
+        self._open_pr(cli, project_root, "a", "feat/a/x", "fa.md")
+        p = cli("human-gate", "--sprint", "s", "--resolve-deadlocks")
+        result = json.loads(p.stdout.strip().splitlines()[-1])
+        assert result == {"resolved": [], "reason": "no_deadlocks"}
+
+
+class TestReviewFindingsRegression:
+    """Regression tests for the three bugs caught in the PR #3 review."""
+
+    def _open_pr(self, cli, project_root: Path, role: str, br: str, path: str) -> str:
+        cli("branch", "create", br)
+        slug = br.replace("/", "__")
+        f = project_root / "workspace" / "wt" / slug / path
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(f"draft by {role}\n")
+        cli("commit", "--branch", br, "--author", role,
+            "--message", f"{role} draft", "--files", path)
+        return cli("pr", "open", "--branch", br, "--author", role,
+                   "--title", f"{role}: t", "--sprint", "s",
+                   "--files", path).stdout.strip()
+
+    def test_followup_rebuttal_msg_id_resolves_to_real_message(
+        self, cli, project_root: Path
+    ) -> None:
+        """Bug #1: rebuttal_msg_id used datetime.now() at construction time
+        but reconstructed from ReviewComment.timestamp at lookup time, so
+        the two ids diverged. Single-source-of-truth fix means the FOLLOWUP
+        turn's rebuttal_msg_id must point at a real transcript entry.
+        """
+        cli("bootstrap")
+        pr_a = self._open_pr(cli, project_root, "a", "feat/a/x", "fa.md")
+
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "b",
+            "--comment", "blocker", "--verdict", "REQUEST_CHANGES",
+            "--phase", "REVIEW")
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "a",
+            "--comment", "addressed in commit X", "--verdict", "COMMENT",
+            "--phase", "REBUTTAL")
+
+        # Drain turns until the FOLLOWUP slot is returned.
+        followup_turn: dict | None = None
+        for _ in range(20):
+            out = json.loads(cli("debate", "next-turn", "--sprint", "s").stdout)
+            if out.get("done"):
+                break
+            if out["phase"] == "FOLLOWUP" and out["pr_id"] == pr_a:
+                followup_turn = out
+                break
+
+        assert followup_turn is not None, "FOLLOWUP slot must surface"
+        assert "rebuttal_msg_id" in followup_turn
+
+        # The referenced id MUST exist in the transcript — the bug was
+        # that it pointed at a never-stored phantom.
+        debate = json.loads(
+            (project_root / "state" / "debates" / "s.json").read_text()
+        )["debate"]
+        transcript_ids = {m["id"] for m in debate["transcript"]}
+        assert followup_turn["rebuttal_msg_id"] in transcript_ids
+
+    def test_schema_mismatch_prints_clean_error_not_traceback(
+        self, cli, project_root: Path
+    ) -> None:
+        """Bug #2: StateSchemaMismatch inherits ValueError; the CLI only
+        caught StateLockTimeout, so old state surfaced as a raw Python
+        traceback instead of the actionable bootstrap-reset message.
+        """
+        cli("bootstrap")
+        self._open_pr(cli, project_root, "a", "feat/a/x", "fa.md")
+
+        # Stomp on the persisted PR registry with a pre-schema-2 payload.
+        prs_path = project_root / "state" / "prs.json"
+        legacy = (
+            '{"pr-1": {"id": "pr-1", "title": "t", "branch": "b", '
+            '"author": "a", "sprint_id": "s"}}'
+        )
+        prs_path.write_text(legacy)
+
+        p = cli("pr", "list", expect_ok=False)
+        assert p.returncode == 1
+        # The actionable message reaches the user...
+        assert "schema_version" in p.stderr
+        assert "bootstrap --reset" in p.stderr
+        # ...and a Python traceback does not.
+        assert "Traceback" not in p.stderr
+        assert "ValueError" not in p.stderr
+
+    def test_stuck_pr_promoted_to_deadlocked_on_schedule_exhaustion(
+        self, cli, project_root: Path
+    ) -> None:
+        """Bug #3: a PR stuck in CHANGES_REQUESTED with no further
+        scheduled turns had no resolution path. The next-turn handler now
+        promotes it to DEADLOCKED so human-gate --resolve-deadlocks picks
+        it up naturally.
+
+        Scenario: b requests changes on pr_a, the orchestrator never
+        spawns the rebuttal subagent (simulated by draining the schedule
+        without posting a REBUTTAL or any further comment from b), and
+        the schedule eventually exhausts. Without the fix the next-turn
+        handler returned ``reason: schedule_exhausted`` and the PR was
+        invisible to ``human-gate --resolve-deadlocks``.
+        """
+        cli("bootstrap")
+        pr_a = self._open_pr(cli, project_root, "a", "feat/a/x", "fa.md")
+
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "b",
+            "--comment", "blocker", "--verdict", "REQUEST_CHANGES",
+            "--phase", "REVIEW")
+
+        # Drain the schedule. Skip the REBUTTAL slot (no author response)
+        # and skip every slot that would let `b` flip the verdict to
+        # APPROVE on pr_a, since the bug under test requires `b` to
+        # remain in `open_change_requests`. All other slots get a noise
+        # COMMENT so the schedule actually advances.
+        done_payload: dict = {}
+        for _ in range(30):
+            out = json.loads(cli("debate", "next-turn", "--sprint", "s").stdout)
+            if out.get("done"):
+                done_payload = out
+                break
+            if out["phase"] == "REBUTTAL":
+                continue
+            if out["pr_id"] == pr_a and out["speaker"] == "b":
+                continue
+            cli("pr", "comment", "--id", out["pr_id"],
+                "--reviewer", out["speaker"],
+                "--comment", "noted", "--verdict", "COMMENT",
+                "--phase", out["phase"])
+
+        assert done_payload.get("done") is True
+        assert done_payload["reason"] == "deadlocked"
+        assert pr_a in done_payload["deadlocked_prs"]
+
+        # And the PR is now visible to the human-gate deadlock loop.
+        ls = cli("pr", "list", "--sprint", "s").stdout
+        assert "DEADLOCKED" in ls
