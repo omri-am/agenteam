@@ -39,7 +39,7 @@ def project_root(tmp_path: Path) -> Path:
 def cli_env(project_root: Path) -> dict[str, str]:
     """Environment block that points the CLI at ``project_root``."""
     env = os.environ.copy()
-    env["AGENTEAM_ROOT"] = str(project_root)
+    env["AGENSUITE_ROOT"] = str(project_root)
     # PYTHONPATH already covers src/ when the package is installed via `pip
     # install -e .`; for ad-hoc test runs we point at the in-tree src layout.
     project_src = Path(__file__).resolve().parents[1] / "src"
@@ -53,7 +53,7 @@ def cli(project_root: Path, cli_env: dict[str, str]):
 
     def _run(*args: str, expect_ok: bool = True) -> subprocess.CompletedProcess[str]:
         p = subprocess.run(
-            [sys.executable, "-m", "agenteam.cli", *args],
+            [sys.executable, "-m", "agensuite.cli", *args],
             cwd=str(project_root),
             env=cli_env,
             capture_output=True,
@@ -61,7 +61,7 @@ def cli(project_root: Path, cli_env: dict[str, str]):
         )
         if expect_ok and p.returncode != 0:
             pytest.fail(
-                f"agenteam {' '.join(args)} exited {p.returncode}\n"
+                f"agensuite {' '.join(args)} exited {p.returncode}\n"
                 f"stdout: {p.stdout}\nstderr: {p.stderr}"
             )
         return p

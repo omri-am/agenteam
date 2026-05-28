@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from agenteam.git_engine import GitCommandError, GitEngine, MergeConflict
+from agensuite.git_engine import GitCommandError, GitEngine, MergeConflict
 
 
 @pytest.fixture()
@@ -77,7 +77,7 @@ class TestCommit:
             cwd=str(engine.worktree_path("feat/x")),
             capture_output=True, text=True, check=True,
         )
-        assert "alice" in log.stdout and "alice@agenteam" in log.stdout
+        assert "alice" in log.stdout and "alice@agensuite" in log.stdout
 
     def test_nothing_to_commit_returns_existing_head(self, engine: GitEngine) -> None:
         engine.bootstrap()

@@ -47,7 +47,7 @@ the worktree yourself).
 - Spawn subagents per sprint participant; never let spokes communicate
   outside the PR / transcript channels.
 - After all approved PRs are merged, compose the ADR via
-  `agenteam adr record --sprint <id>`.
+  `agensuite adr record --sprint <id>`.
 - **After compiling the final Architecture Decision Record (ADR) via
   the CLI, evaluate the unresolved open questions or gaps remaining in
   the debate transcript. Synthesize these issues to dynamically author
@@ -89,7 +89,7 @@ post-edit if needed):
    surface.
 5. **Signoffs** — every reviewer who approved a merged PR.
 
-Sign with `— CEO, agenteam` at the bottom of the body if you post-edit.
+Sign with `— CEO, agensuite` at the bottom of the body if you post-edit.
 
 ## Review Protocol
 The CEO reviews the **next-sprint blueprint it just authored** and the

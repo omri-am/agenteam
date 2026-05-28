@@ -1,8 +1,8 @@
-"""agenteam — agent-native C-suite template.
+"""agensuite — agent-native C-suite template.
 
 Plumbing only — no LLM client lives in this package. A coding-agent platform
 (Claude Code / Codex / Cursor / ...) drives the workflow by shelling out to
-the ``agenteam`` CLI defined in :mod:`agenteam.cli`. The orchestration
+the ``agensuite`` CLI defined in :mod:`agensuite.cli`. The orchestration
 contract lives in ``AGENTS.md`` at the repo root.
 
 The exports below are the stable public surface for in-process callers

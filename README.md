@@ -1,10 +1,10 @@
 ```
- █████╗  ██████╗ ███████╗███╗   ██╗████████╗███████╗ █████╗ ███╗   ███╗
-██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝██╔════╝██╔══██╗████╗ ████║
-███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   █████╗  ███████║██╔████╔██║
-██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ██╔══╝  ██╔══██║██║╚██╔╝██║
-██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ███████╗██║  ██║██║ ╚═╝ ██║
-╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝
+ █████╗  ██████╗ ███████╗███╗   ██╗███████╗██╗   ██╗██╗████████╗███████╗
+██╔══██╗██╔════╝ ██╔════╝████╗  ██║██╔════╝██║   ██║██║╚══██╔══╝██╔════╝
+███████║██║  ███╗█████╗  ██╔██╗ ██║███████╗██║   ██║██║   ██║   █████╗
+██╔══██║██║   ██║██╔══╝  ██║╚██╗██║╚════██║██║   ██║██║   ██║   ██╔══╝
+██║  ██║╚██████╔╝███████╗██║ ╚████║███████║╚██████╔╝██║   ██║   ███████╗
+╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝╚══════╝ ╚═════╝ ╚═╝   ╚═╝   ╚══════╝
 ```
 
 A **universal multi-agent C-suite template** for executing structured,
@@ -29,7 +29,7 @@ state mutation.
 
 ```bash
 pip install -e .
-agenteam bootstrap
+agensuite bootstrap
 ```
 
 Then open the repo in any coding agent and prompt it with:
@@ -48,13 +48,13 @@ sprint blueprint into `sprints/sprint-2.md`.
 | `AGENTS.md` | Contract read by any coding-agent platform on setup. |
 | `.claude/agents/{role}.md` | Native subagent playbooks — one per C-suite role (YAML frontmatter + persona body). |
 | `sprints/sprint-*.md` | Sprint definitions (YAML frontmatter + body). Ships with `sprint-1.md` only; subsequent sprints are authored by the CEO at runtime. |
-| `src/agenteam/` | Pydantic schemas, git engine, state, CLI. |
+| `src/agensuite/` | Pydantic schemas, git engine, state, CLI. |
 | `workspace/` (gitignored) | The inner simulated git repo. |
 | `state/` (gitignored) | JSON registries for PRs and debate transcripts. |
 
 ## CLI
 
-Run `agenteam --help` to see every subcommand, or jump to the reference
+Run `agensuite --help` to see every subcommand, or jump to the reference
 section at the bottom of `AGENTS.md`.
 
 ## License

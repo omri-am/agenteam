@@ -178,15 +178,15 @@ class GitEngine:
             self._run_git("init", "-b", "main", cwd=self.main_dir)
 
         # Repo-scoped identity & signing config so seeding commits always work.
-        self._run_git("config", "user.name", "agenteam", cwd=self.main_dir)
-        self._run_git("config", "user.email", "agenteam@local", cwd=self.main_dir)
+        self._run_git("config", "user.name", "agensuite", cwd=self.main_dir)
+        self._run_git("config", "user.email", "agensuite@local", cwd=self.main_dir)
         self._run_git("config", "commit.gpgsign", "false", cwd=self.main_dir)
         self._run_git("config", "tag.gpgsign", "false", cwd=self.main_dir)
 
         readme = self.main_dir / "README.md"
         if not readme.exists():
             readme.write_text(
-                "# agenteam workspace\n\n"
+                "# agensuite workspace\n\n"
                 "Simulated inner repository written to by spoke subagents.\n"
                 "This file is the baseline commit so worktrees can branch off `main`.\n",
                 encoding="utf-8",
@@ -323,7 +323,7 @@ class GitEngine:
 
         author_cfg = {
             "user.name": author,
-            "user.email": f"{author}@agenteam",
+            "user.email": f"{author}@agensuite",
             "commit.gpgsign": "false",
         }
         result = self._run_git(
