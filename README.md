@@ -29,37 +29,48 @@ mutation.
 
 This repository is the **`agensuite` tool**, not your project. You don't
 clone it and work inside it. Instead you install the tool once, then use
-its `init` command to **scaffold a fresh, standalone project folder** that
-contains *your* startup's `AGENTS.md`, role playbooks, and first sprint —
-with your idea already baked in. You then open *that* folder in your coding
-agent.
+its `init` command to **scaffold a single project folder** that contains
+*your* startup's `AGENTS.md`, role playbooks, and first sprint — with your
+idea already baked in. You then open *that one folder* in your coding agent.
+
+It's **one folder, not two.** `init` creates `my-startup/`; `bootstrap` then
+adds two subfolders *inside* it — `workspace/` and `state/`. You open
+`my-startup/` and never touch those two by hand; the agent drives them.
 
 ```
 agensuite (the installed tool)  ──init──►  my-startup/   ◄── you open THIS in your agent
                                            ├── AGENTS.md           (the contract)
                                            ├── .claude/agents/*.md (CEO/CPO/CTO/CDO/CCO personas)
                                            ├── sprints/sprint-1.md (your idea, substituted in)
-                                           ├── workspace/          (inner git repo — created by bootstrap)
-                                           └── state/              (PR + debate JSON — created by bootstrap)
+                                           ├── workspace/          ← added by bootstrap
+                                           └── state/              ← added by bootstrap
 ```
+
+**What is `workspace/`?** The simulation produces *real git history* —
+branches, PRs, merges, an ADR per sprint. That all happens inside
+`workspace/`, a **nested git repo kept separate from `my-startup/`'s own
+git**, so the simulated company's churn never pollutes your project's
+history. `state/` holds the JSON the CLI uses to track PRs and the debate.
+Both are managed entirely by the agent through the `agensuite` CLI — you
+just read the results.
 
 ## Quickstart (no clone)
 
-The tool installs from the public repo — npm-style, nothing to clone.
-We recommend [`uv`](https://docs.astral.sh/uv/) (`pipx` works identically).
+`agensuite` is on PyPI — install it like any CLI, nothing to clone.
 
 **1. Install the `agensuite` tool once** (puts `agensuite` on your PATH):
 
 ```bash
-uv tool install git+https://github.com/omri-am/agensuite
-# or:  pipx install git+https://github.com/omri-am/agensuite
+uv tool install agensuite
+# or:  pipx install agensuite
+# or:  pip install agensuite
 ```
 
-> One-shot alternative: `uvx --from git+https://github.com/omri-am/agensuite
-> agensuite init my-startup --idea "…"`. Note `uvx` is *ephemeral* — the
-> binary disappears after the command, so you'd have to prefix every later
-> `agensuite` call the same way. The persistent install above is simpler
-> because the workflow runs many `agensuite` commands.
+> One-shot alternative: `uvx agensuite init my-startup --idea "…"`. Note
+> `uvx` is *ephemeral* — the binary disappears after the command, so you'd
+> have to prefix every later `agensuite` call the same way. The persistent
+> install above is simpler because the workflow runs many `agensuite`
+> commands.
 
 **2. Scaffold your project** (substitutes your idea into every template):
 
@@ -68,7 +79,7 @@ agensuite init my-startup --idea "A marketplace for renting camera gear between 
 cd my-startup
 ```
 
-**3. Bootstrap the sandbox** (creates the inner `workspace/` git repo + `state/`):
+**3. Bootstrap the sandbox** (adds the nested `workspace/` git repo + `state/` *inside* `my-startup/`):
 
 ```bash
 agensuite bootstrap
@@ -96,10 +107,6 @@ Following the `AGENTS.md` contract, the agent plays the **CEO** and:
    `governance/`.
 5. Asks the CEO subagent to author the next blueprint into
    `sprints/sprint-2.md` — then the loop repeats.
-
-> **Coming soon:** once published to PyPI, install simplifies to
-> `uv tool install agensuite` / `pipx install agensuite` (or `uvx agensuite
-> init …`), dropping the `git+https://…` URL.
 
 ## Layout (inside a scaffolded project)
 
