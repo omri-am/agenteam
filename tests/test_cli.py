@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
 
 class TestBootstrap:
     def test_idempotent(self, cli) -> None:
@@ -353,9 +355,7 @@ class TestInit:
         )
         assert p.returncode == 0, p.stderr
         sprint = (tmp_path / "defaults-app" / "sprints" / "sprint-1.md").read_text()
-        import yaml as _yaml
-
-        meta = _yaml.safe_load(sprint.split("---\n", 2)[1])
+        meta = yaml.safe_load(sprint.split("---\n", 2)[1])
         assert meta["debate_rounds"] == 2
         assert meta["approval_quorum"] == 2
         assert meta["participants"] == ["cpo", "cto", "cdo", "cco"]

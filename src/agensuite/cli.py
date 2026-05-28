@@ -347,7 +347,7 @@ def init(
             ),
             encoding="utf-8",
         )
-    except OSError as e:
+    except (OSError, ValueError) as e:
         raise _err(f"init failed: {e}") from e
 
     typer.echo(f"Successfully initialized agensuite project at {target}")
