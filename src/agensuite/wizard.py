@@ -41,9 +41,20 @@ def default_answers(idea: str) -> InitAnswers:
     return InitAnswers(idea=idea)
 
 
+def _required(answer: object) -> str:
+    """Return a questionary answer, or abort cleanly if the user cancelled.
+
+    ``questionary``'s ``.ask()`` returns ``None`` on Ctrl-C / EOF instead of
+    raising. Treat that as an explicit abort of the whole setup.
+    """
+    if answer is None:
+        raise SystemExit("setup cancelled")
+    return str(answer)
+
+
 def _ask_idea() -> str:
     while True:
-        idea = (questionary.text("Describe your startup in one line:").ask() or "").strip()
+        idea = _required(questionary.text("Describe your startup in one line:").ask()).strip()
         if idea:
             return idea
         questionary.print("  idea cannot be empty.", style="fg:red")
@@ -75,22 +86,26 @@ def _ask_biases() -> dict[str, list[str]]:
 
 def _ask_sprint() -> tuple[int, int, list[str]]:
     rounds = int(
-        questionary.text(
-            "Debate rounds for sprint 1:",
-            default="2",
-            validate=lambda v: v.isdigit() and int(v) >= 1,
-        ).ask()
+        _required(
+            questionary.text(
+                "Debate rounds for sprint 1:",
+                default="2",
+                validate=lambda v: v.isdigit() and int(v) >= 1,
+            ).ask()
+        )
     )
     participants = questionary.checkbox(
         "Sprint-1 participants:",
         choices=[questionary.Choice(s.upper(), value=s, checked=True) for s in SPOKES],
     ).ask() or list(SPOKES)
     quorum = int(
-        questionary.text(
-            f"Approval quorum (1..{len(participants)}):",
-            default="2",
-            validate=lambda v, n=len(participants): v.isdigit() and 1 <= int(v) <= n,
-        ).ask()
+        _required(
+            questionary.text(
+                f"Approval quorum (1..{len(participants)}):",
+                default="2",
+                validate=lambda v, n=len(participants): v.isdigit() and 1 <= int(v) <= n,
+            ).ask()
+        )
     )
     return rounds, quorum, participants
 
