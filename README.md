@@ -51,11 +51,11 @@ We recommend [`uv`](https://docs.astral.sh/uv/) (`pipx` works identically).
 **1. Install the `agensuite` tool once** (puts `agensuite` on your PATH):
 
 ```bash
-uv tool install git+https://github.com/omri-am/agenteam
-# or:  pipx install git+https://github.com/omri-am/agenteam
+uv tool install git+https://github.com/omri-am/agensuite
+# or:  pipx install git+https://github.com/omri-am/agensuite
 ```
 
-> One-shot alternative: `uvx --from git+https://github.com/omri-am/agenteam
+> One-shot alternative: `uvx --from git+https://github.com/omri-am/agensuite
 > agensuite init my-startup --idea "…"`. Note `uvx` is *ephemeral* — the
 > binary disappears after the command, so you'd have to prefix every later
 > `agensuite` call the same way. The persistent install above is simpler
@@ -122,8 +122,8 @@ Only needed if you want to change the tool (CLI, schemas, templates) — not
 to use it. Clone and install editable:
 
 ```bash
-git clone https://github.com/omri-am/agenteam
-cd agenteam
+git clone https://github.com/omri-am/agensuite
+cd agensuite
 pip install -e ".[dev]"
 pytest
 ```

@@ -5,10 +5,6 @@ Publishing is automated via `.github/workflows/publish.yml`. It triggers
 uses PyPI **Trusted Publishing** (OIDC), so there are no API tokens stored
 anywhere.
 
-> Note: the PyPI distribution is `agensuite`, but the GitHub **repo** is
-> still `omri-am/agenteam`. The `agenteam` values below are repo
-> coordinates, not the package name.
-
 ## One-time setup (do this once, on pypi.org)
 
 Trusted Publishing must be registered *before* the package exists on PyPI —
@@ -18,7 +14,7 @@ PyPI calls this a "pending publisher."
 2. Go to **Your account → Publishing → Add a pending publisher** and enter:
    - **PyPI project name:** `agensuite`
    - **Owner:** `omri-am`
-   - **Repository name:** `agenteam`
+   - **Repository name:** `agensuite`
    - **Workflow filename:** `publish.yml`
    - **Environment name:** `pypi`
 3. (Optional but recommended) In the GitHub repo: **Settings → Environments
