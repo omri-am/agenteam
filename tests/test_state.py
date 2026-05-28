@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from agenteam.models import DebateState, PullRequest
-from agenteam.state import (
+from agensuite.models import DebateState, PullRequest
+from agensuite.state import (
     DebateStore,
     PRRegistry,
     StateLockTimeout,

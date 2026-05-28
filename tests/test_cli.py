@@ -1,8 +1,8 @@
 """End-to-end CLI tests driven via subprocess.
 
 These tests are the closest match to how a coding-agent orchestrator
-actually drives the CLI. Each test spawns ``python -m agenteam.cli`` with
-``AGENTEAM_ROOT`` pointing at an isolated tmp directory.
+actually drives the CLI. Each test spawns ``python -m agensuite.cli`` with
+``AGENSUITE_ROOT`` pointing at an isolated tmp directory.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ class TestBootstrap:
         assert "workspace ready at" in p.stdout
 
     def test_bare_invocation_prints_banner_and_help(self, cli) -> None:
-        """`agenteam` with no subcommand: banner on stderr, help on stdout,
+        """`agensuite` with no subcommand: banner on stderr, help on stdout,
         exit code 0 (user explicitly asked for help by typing the bare cmd)."""
         p = cli(expect_ok=True)
         assert p.returncode == 0
@@ -44,12 +44,12 @@ class TestBootstrap:
         project = tmp_path / "outside-source"
         project.mkdir()
         env = os.environ.copy()
-        env.pop("AGENTEAM_ROOT", None)
+        env.pop("AGENSUITE_ROOT", None)
         project_src = Path(__file__).resolve().parents[1] / "src"
         env["PYTHONPATH"] = str(project_src) + os.pathsep + env.get("PYTHONPATH", "")
 
         p = subprocess.run(
-            [sys.executable, "-m", "agenteam.cli", "bootstrap"],
+            [sys.executable, "-m", "agensuite.cli", "bootstrap"],
             cwd=str(project),
             env=env,
             capture_output=True,
@@ -247,27 +247,27 @@ class TestMidDebatePR:
         assert tail_targets == {pr_c}
 
 
-def _agenteam_env(extra_root: Path | None = None) -> dict[str, str]:
+def _agensuite_env(extra_root: Path | None = None) -> dict[str, str]:
     """Env block that points the CLI's import path at the in-tree ``src/``.
 
-    ``init`` writes to an arbitrary target directory, not ``AGENTEAM_ROOT``, so
-    a stray ``AGENTEAM_ROOT`` inherited from the parent shell is stripped to
+    ``init`` writes to an arbitrary target directory, not ``AGENSUITE_ROOT``, so
+    a stray ``AGENSUITE_ROOT`` inherited from the parent shell is stripped to
     prevent test flakiness. ``extra_root`` re-introduces it for the
     ``chief customize`` tests that need a fixed project root.
     """
     env = os.environ.copy()
-    env.pop("AGENTEAM_ROOT", None)
+    env.pop("AGENSUITE_ROOT", None)
     project_src = Path(__file__).resolve().parents[1] / "src"
     env["PYTHONPATH"] = str(project_src) + os.pathsep + env.get("PYTHONPATH", "")
     if extra_root is not None:
-        env["AGENTEAM_ROOT"] = str(extra_root)
+        env["AGENSUITE_ROOT"] = str(extra_root)
     return env
 
 
 def _run(args: list[str], cwd: Path, env: dict[str, str], stdin: str | None = None
          ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, "-m", "agenteam.cli", *args],
+        [sys.executable, "-m", "agensuite.cli", *args],
         cwd=str(cwd),
         env=env,
         capture_output=True,
@@ -277,10 +277,10 @@ def _run(args: list[str], cwd: Path, env: dict[str, str], stdin: str | None = No
 
 
 class TestInit:
-    """`agenteam init <name> --idea "<text>"` scaffolds a new project."""
+    """`agensuite init <name> --idea "<text>"` scaffolds a new project."""
 
     def test_idea_flag_substitutes_tokens(self, tmp_path: Path) -> None:
-        env = _agenteam_env()
+        env = _agensuite_env()
         p = _run(
             ["init", "fintech-app", "--idea", "Trading platform for retail investors"],
             cwd=tmp_path,
@@ -310,11 +310,11 @@ class TestInit:
         # Friendly next-steps message lands on stdout.
         assert "Successfully initialized" in p.stdout
         assert f"cd {target}" in p.stdout
-        assert "agenteam bootstrap" in p.stdout
+        assert "agensuite bootstrap" in p.stdout
 
     def test_interactive_prompt_fallback(self, tmp_path: Path) -> None:
         """No --idea flag triggers a typer.prompt; stdin satisfies it."""
-        env = _agenteam_env()
+        env = _agensuite_env()
         p = _run(
             ["init", "indie-game"],
             cwd=tmp_path,
@@ -326,14 +326,14 @@ class TestInit:
         assert "Roguelike with procedural narrative" in sprint
 
     def test_init_refuses_to_overwrite_non_empty_dir(self, tmp_path: Path) -> None:
-        env = _agenteam_env()
+        env = _agensuite_env()
         _run(["init", "x", "--idea", "first run"], cwd=tmp_path, env=env)
         p = _run(["init", "x", "--idea", "second run"], cwd=tmp_path, env=env)
         assert p.returncode == 1
         assert "not empty" in p.stderr
 
     def test_init_accepts_absolute_path(self, tmp_path: Path) -> None:
-        env = _agenteam_env()
+        env = _agensuite_env()
         target = tmp_path / "nested" / "app"
         p = _run(
             ["init", str(target), "--idea", "Pet teleporter"],
@@ -345,7 +345,7 @@ class TestInit:
 
 
 class TestChiefCustomize:
-    """`agenteam chief customize <role> --focus "<text>"`."""
+    """`agensuite chief customize <role> --focus "<text>"`."""
 
     def _scaffold(self, tmp_path: Path, env: dict[str, str]) -> Path:
         p = _run(
@@ -357,9 +357,9 @@ class TestChiefCustomize:
         return tmp_path / "co"
 
     def test_append_bias_to_cto(self, tmp_path: Path) -> None:
-        env = _agenteam_env()
+        env = _agensuite_env()
         project = self._scaffold(tmp_path, env)
-        env_with_root = _agenteam_env(extra_root=project)
+        env_with_root = _agensuite_env(extra_root=project)
 
         focus = "Rust backend with high throughput"
         p = _run(
@@ -380,9 +380,9 @@ class TestChiefCustomize:
         assert "Single regional deployment" in biases
 
     def test_unknown_role_rejected(self, tmp_path: Path) -> None:
-        env = _agenteam_env()
+        env = _agensuite_env()
         project = self._scaffold(tmp_path, env)
-        env_with_root = _agenteam_env(extra_root=project)
+        env_with_root = _agensuite_env(extra_root=project)
         p = _run(
             ["chief", "customize", "cfo", "--focus", "irrelevant"],
             cwd=project,
@@ -393,7 +393,7 @@ class TestChiefCustomize:
 
     def test_missing_agent_file_rejected(self, tmp_path: Path) -> None:
         """Running outside an initialised project (no .claude/agents/) fails clean."""
-        env_with_root = _agenteam_env(extra_root=tmp_path)
+        env_with_root = _agensuite_env(extra_root=tmp_path)
         p = _run(
             ["chief", "customize", "cto", "--focus", "anything"],
             cwd=tmp_path,
@@ -403,9 +403,9 @@ class TestChiefCustomize:
         assert "agent file not found" in p.stderr
 
     def test_role_argument_is_case_insensitive(self, tmp_path: Path) -> None:
-        env = _agenteam_env()
+        env = _agensuite_env()
         project = self._scaffold(tmp_path, env)
-        env_with_root = _agenteam_env(extra_root=project)
+        env_with_root = _agensuite_env(extra_root=project)
         p = _run(
             ["chief", "customize", "CTO", "--focus", "GPU inference path"],
             cwd=project,
@@ -602,7 +602,7 @@ class TestHumanGateResolveDeadlocks:
 
         # Drive --resolve-deadlocks with stdin "m\n" so the human picks merge.
         p = subprocess.run(
-            [sys.executable, "-m", "agenteam.cli", "human-gate",
+            [sys.executable, "-m", "agensuite.cli", "human-gate",
              "--sprint", "s", "--resolve-deadlocks"],
             cwd=str(project_root),
             env=cli_env,
@@ -625,7 +625,7 @@ class TestHumanGateResolveDeadlocks:
     ) -> None:
         pr_a = self._drive_to_deadlock(cli, project_root)
         p = subprocess.run(
-            [sys.executable, "-m", "agenteam.cli", "human-gate",
+            [sys.executable, "-m", "agensuite.cli", "human-gate",
              "--sprint", "s", "--resolve-deadlocks"],
             cwd=str(project_root),
             env=cli_env,

@@ -1,11 +1,11 @@
-"""Unit tests for the Pydantic schemas in :mod:`agenteam.models`."""
+"""Unit tests for the Pydantic schemas in :mod:`agensuite.models`."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
 
-from agenteam.models import (
+from agensuite.models import (
     DebateState,
     DebateTurn,
     DecisionRecord,

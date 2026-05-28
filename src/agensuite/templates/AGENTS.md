@@ -11,7 +11,7 @@
 >    primitive** (Claude Code's `Agent` tool with `subagent_type: <role>`,
 >    Codex's `agents.spawn(...)`, Cursor's background composers, etc.).
 > 2. **Repository & state mutations** flow exclusively through the
->    `agenteam` Python CLI under `src/agenteam/`. The CLI is the
+>    `agensuite` Python CLI under `src/agensuite/`. The CLI is the
 >    deterministic rails: atomic JSON state files, synchronous git
 >    worktrees, debate scheduling, reviewer-author guards.
 >
@@ -32,7 +32,7 @@ You play the **CEO**. You will:
 - **Drive a turn-based debate** between spokes via PR comments produced
   through the CLI.
 - Never let spokes talk to each other outside the PR + transcript channels.
-- Treat every state mutation as something only the **`agenteam` CLI** is
+- Treat every state mutation as something only the **`agensuite` CLI** is
   allowed to perform. Reading files (with your normal Read/Bash tools) is
   fine; writing repo state must flow through the CLI so this template
   works identically across coding-agent platforms.
@@ -47,14 +47,14 @@ You play the **CEO**. You will:
 | Concern                                  | Lives in                          | Touched by  |
 |------------------------------------------|-----------------------------------|-------------|
 | Persona, biases, deliverable schema      | `.claude/agents/{role}.md`        | LLM only    |
-| Branch / worktree / commit / PR / merge  | `agenteam` CLI                    | Shell only  |
+| Branch / worktree / commit / PR / merge  | `agensuite` CLI                    | Shell only  |
 | Debate turn schedule (append-only)       | `DebateState.schedule` in CLI     | Shell only  |
 | Turn phase (REVIEW / REBUTTAL / FOLLOWUP)| `DebateTurn.phase` in CLI         | Shell only  |
-| Verdict-based termination                | `agenteam debate next-turn`       | Shell only  |
-| ADR scaffolding                          | `agenteam adr record`             | Shell only  |
+| Verdict-based termination                | `agensuite debate next-turn`       | Shell only  |
+| ADR scaffolding                          | `agensuite adr record`             | Shell only  |
 | Sprint config (YAML frontmatter + body)  | `sprints/sprint-{n}.md`           | Both        |
 | Next-sprint authoring                    | CEO subagent post-ADR             | LLM only    |
-| Deadlock resolution                      | `agenteam human-gate --resolve-deadlocks` | Both |
+| Deadlock resolution                      | `agensuite human-gate --resolve-deadlocks` | Both |
 
 If you find yourself paraphrasing persona text, stop — spawn the
 subagent instead. If you find yourself touching `state/*.json` or
@@ -64,7 +64,7 @@ running raw `git` commands inside `workspace/`, stop — use the CLI.
 
 ```
 pip install -e .
-agenteam bootstrap
+agensuite bootstrap
 ```
 
 `bootstrap` is idempotent. It creates `workspace/main/` (a real git
@@ -105,13 +105,13 @@ finding new work without a pre-baked roadmap.
 
 ```
 cfg = parse `sprints/{sprint_id}.md`            # YAML frontmatter
-prereqs = { p.path: agenteam read --branch p.branch --path p.path
+prereqs = { p.path: agensuite read --branch p.branch --path p.path
             for p in cfg.prerequisite_files }
 
 # --- spoke drafting (parallel) ---
 for role in cfg.participants:
     branch = f"feat/{role}/{slug_of(cfg.title)}"
-    agenteam branch create {branch}
+    agensuite branch create {branch}
 
     # Native subagent spawn — DO NOT inline the persona text.
     # The playbook at .claude/agents/{role}.md is loaded by the platform.
@@ -123,9 +123,9 @@ for role in cfg.participants:
     )
     <subagent edits workspace/wt/feat__{role}__{slug}/...>
 
-    agenteam commit --branch {branch} --author {role} \
+    agensuite commit --branch {branch} --author {role} \
         --message "{role} draft for {sprint_id}" --files <paths>
-    pr_id = agenteam pr open --branch {branch} --author {role} \
+    pr_id = agensuite pr open --branch {branch} --author {role} \
         --title "{ROLE}: {cfg.title}" --files <paths> --sprint {sprint_id}
 
 # --- debate (verdict-terminated; bounded threaded rebuttals) ---
@@ -136,11 +136,11 @@ for role in cfg.participants:
 # template accordingly.
 last_done = None
 while True:
-    turn = json.loads(agenteam debate next-turn --sprint {sprint_id})
+    turn = json.loads(agensuite debate next-turn --sprint {sprint_id})
     if turn.get("done"):
         last_done = turn
         break
-    tail = agenteam debate tail --sprint {sprint_id} --window 6
+    tail = agensuite debate tail --sprint {sprint_id} --window 6
 
     if turn.phase == "REVIEW":
         prompt = (f"Review PR {turn.pr_id}. Recent debate: {tail}. "
@@ -160,27 +160,27 @@ while True:
     extra = []
     if turn.phase == "FOLLOWUP":
         extra = ["--parent-turn-idx", str(turn.parent_turn_idx)]
-    agenteam pr comment --id {turn.pr_id} --reviewer {turn.speaker} \
+    agensuite pr comment --id {turn.pr_id} --reviewer {turn.speaker} \
         --verdict <APPROVE|REQUEST_CHANGES|COMMENT> --phase {turn.phase} \
         --comment "<critique>" [{extra}]
 
 # --- deadlock resolution (only if any reviewer stood at FOLLOWUP) ---
 if last_done.get("reason") == "deadlocked":
-    agenteam human-gate --sprint {sprint_id} --resolve-deadlocks
+    agensuite human-gate --sprint {sprint_id} --resolve-deadlocks
 
 # --- human gate (banner / pause) ---
-agenteam human-gate --message "Inspect debate for {sprint_id}"
+agensuite human-gate --message "Inspect debate for {sprint_id}"
 
 # --- merge + ADR ---
-for pr in agenteam pr list --sprint {sprint_id}:
+for pr in agensuite pr list --sprint {sprint_id}:
     if pr meets quorum and has no open change requests:
-        agenteam pr merge --id {pr.id}     # marks REJECTED on conflict
+        agensuite pr merge --id {pr.id}     # marks REJECTED on conflict
 
 # ADR composition is delegated to the CEO subagent for narrative,
 # but persisted via the CLI:
 spawn_subagent(subagent_type = "ceo",
                prompt = "Compose ADR for {sprint_id} from merged PRs and debate tail.")
-agenteam adr record --sprint {sprint_id}
+agensuite adr record --sprint {sprint_id}
 
 # --- dynamic next-sprint authoring ---
 # The CEO subagent inspects the debate transcript for unresolved
@@ -192,7 +192,7 @@ spawn_subagent(subagent_type = "ceo",
 ```
 
 All CLI commands return non-zero on error so you can detect failures from
-the shell exit code. `agenteam debate next-turn` is the single source of
+the shell exit code. `agensuite debate next-turn` is the single source of
 truth for **the next required turn, derived from current PR state** —
 never derive turn order from the LLM side. The `DebateState.schedule` is
 seeded at sprint kickoff and extended in place (append-only) as
@@ -231,7 +231,7 @@ The CLI contract is canonical. Native subagent dispatch is platform-specific:
 
 - **Spokes never touch `main`.** They only edit files inside their
   worktree (`workspace/wt/feat__{role}__{slug}/`). The CEO (you) merges
-  into `main` via `agenteam pr merge`.
+  into `main` via `agensuite pr merge`.
 - **Reviewers never review their own PR.** The CLI enforces this — a
   `pr comment --phase REVIEW` or `--phase FOLLOWUP` where
   `reviewer == pr.author` exits non-zero. The one exception is
@@ -239,28 +239,28 @@ The CLI contract is canonical. Native subagent dispatch is platform-specific:
   the only path by which the author posts to their own PR.
 - **Prerequisite files must be read from `main` first.** Any sprint
   whose YAML frontmatter declares `prerequisite_files` requires the
-  orchestrator to run `agenteam read --branch <b> --path <p>` for each
+  orchestrator to run `agensuite read --branch <b> --path <p>` for each
   entry and inject the content into every spawned subagent's prompt.
   Skipping this step lets spokes hallucinate constraints that
   contradict the merged truth on `main`.
 - **Mutations only via CLI.** Don't `git commit` from inside the
-  workspace directly; use `agenteam commit` so the author identity and
+  workspace directly; use `agensuite commit` so the author identity and
   the PR registry stay consistent.
 - **Persona fidelity.** Don't paraphrase `.claude/agents/{role}.md`
   when spawning a subagent. Either the platform loads it verbatim or
   you read+pass the full body verbatim.
 - **Append-only debate schedule.** Turn order comes from
-  `agenteam debate next-turn`, never from the LLM. Consumed slots and
+  `agensuite debate next-turn`, never from the LLM. Consumed slots and
   their ordering are immutable; REBUTTAL slots are appended when a
   reviewer posts `REQUEST_CHANGES`, and FOLLOWUP slots are appended once
   the author's REBUTTAL is consumed. The schedule itself is therefore an
   upper bound — `next-turn` returns `{"done": true, ...}` as soon as
   every PR is terminal (MERGED / REJECTED / DEADLOCKED) or has quorum
   with no open change requests.
-- **Verdict-based merge predicate.** `agenteam pr merge` refuses a PR
+- **Verdict-based merge predicate.** `agensuite pr merge` refuses a PR
   that is `DEADLOCKED`, that lacks quorum, or that has any open
   `REQUEST_CHANGES` from a non-author reviewer. The only path that can
-  merge a `DEADLOCKED` PR is `agenteam human-gate --resolve-deadlocks`,
+  merge a `DEADLOCKED` PR is `agensuite human-gate --resolve-deadlocks`,
   which is an explicit human override on the record.
 - **CEO owns the roadmap, not the repo.** The next-sprint blueprint
   is authored by the CEO subagent only after the current sprint's ADR
@@ -269,29 +269,29 @@ The CLI contract is canonical. Native subagent dispatch is platform-specific:
 ## Reference: CLI Surface
 
 ```
-agenteam bootstrap [--reset]
-agenteam sprint show <id>
-agenteam sprint list
-agenteam branch create <name> [--base main]
-agenteam read --branch <b> --path <p>
-agenteam commit --branch <b> --author <a> --message <m> --files <f> [--files ...]
-agenteam pr open --branch <b> --author <a> --title <t> --sprint <s> [--files ...] [--description ...]
-agenteam pr comment --id <pr> --reviewer <r> --comment <c> \
+agensuite bootstrap [--reset]
+agensuite sprint show <id>
+agensuite sprint list
+agensuite branch create <name> [--base main]
+agensuite read --branch <b> --path <p>
+agensuite commit --branch <b> --author <a> --message <m> --files <f> [--files ...]
+agensuite pr open --branch <b> --author <a> --title <t> --sprint <s> [--files ...] [--description ...]
+agensuite pr comment --id <pr> --reviewer <r> --comment <c> \
     [--verdict APPROVE|REQUEST_CHANGES|COMMENT] \
     [--phase REVIEW|REBUTTAL|FOLLOWUP] \
     [--parent-turn-idx <n>]            # required for FOLLOWUP
     [--approve]                        # DEPRECATED — alias for --verdict APPROVE
     [--file <f>]
-agenteam pr list [--sprint <s>]
-agenteam pr merge --id <pr>            # refuses DEADLOCKED + open change requests
-agenteam debate next-turn --sprint <s> # returns turn JSON with phase/prompt_hint
-agenteam debate tail --sprint <s> [--window 6]
-agenteam human-gate --message <msg>
-agenteam human-gate --sprint <s> --resolve-deadlocks  # walks DEADLOCKED PRs
-agenteam adr record --sprint <s>
+agensuite pr list [--sprint <s>]
+agensuite pr merge --id <pr>            # refuses DEADLOCKED + open change requests
+agensuite debate next-turn --sprint <s> # returns turn JSON with phase/prompt_hint
+agensuite debate tail --sprint <s> [--window 6]
+agensuite human-gate --message <msg>
+agensuite human-gate --sprint <s> --resolve-deadlocks  # walks DEADLOCKED PRs
+agensuite adr record --sprint <s>
 ```
 
-The Pydantic schemas in `src/agenteam/models.py` and the persisted state
+The Pydantic schemas in `src/agensuite/models.py` and the persisted state
 shape under `state/` carry a `schema_version` stamp — bumping it requires
 an ADR. The bounded-rebuttal protocol (verdict + phase + append-only
 schedule + verdict-based termination + human-gated deadlocks) is the

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agenteam.sprint_loader import (
+from agensuite.sprint_loader import (
     SprintParseError,
     list_sprints,
     load_sprint,

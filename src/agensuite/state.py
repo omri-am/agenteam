@@ -46,7 +46,7 @@ class StateSchemaMismatch(ValueError):
         super().__init__(
             f"state file at {path} has schema_version={found!r} but the "
             f"current CLI expects {STATE_SCHEMA_VERSION}. State is "
-            "regenerable from sprints/*.md — run 'agenteam bootstrap --reset' "
+            "regenerable from sprints/*.md — run 'agensuite bootstrap --reset' "
             "to wipe and start over."
         )
 
@@ -76,7 +76,7 @@ def ensure_dirs(root: Path) -> None:
     """Create the ``state/`` and ``state/debates/`` directories.
 
     Idempotent — safe to call before every operation. The git workspace is
-    created separately by :class:`agenteam.git_engine.GitEngine`.
+    created separately by :class:`agensuite.git_engine.GitEngine`.
     """
     (_state_dir(root) / "debates").mkdir(parents=True, exist_ok=True)
 
@@ -146,7 +146,7 @@ class StateLockTimeout(TimeoutError):
         super().__init__(
             f"state lock at {lock_path}{owner_blurb} not released within {timeout_s}s; "
             "if the holder has died, remove the directory manually or call "
-            "agenteam.state.clear_stale_lock()."
+            "agensuite.state.clear_stale_lock()."
         )
 
 

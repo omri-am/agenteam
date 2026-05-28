@@ -1,12 +1,12 @@
-"""agenteam CLI — the only mutation surface for orchestrating coding agents.
+"""agensuite CLI — the only mutation surface for orchestrating coding agents.
 
 Every state-changing operation flows through one of these subcommands so that
 any coding-agent platform (Claude Code, Codex, Cursor, ...) can drive the
-same workflow identically by shelling out to ``agenteam ...``.
+same workflow identically by shelling out to ``agensuite ...``.
 
 Exit-code convention:
 
-* ``0`` — success (also: bare ``agenteam`` invocation that prints banner +
+* ``0`` — success (also: bare ``agensuite`` invocation that prints banner +
   help, since "user asked for help and got it" is not a failure)
 * ``1`` — generic / user error (unknown PR, sprint not found, schema
   validation failure, missing quorum, ...)
@@ -58,12 +58,12 @@ from .state import (
 
 
 _BANNER = """\
- █████╗  ██████╗ ███████╗███╗   ██╗████████╗███████╗ █████╗ ███╗   ███╗
-██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝██╔════╝██╔══██╗████╗ ████║
-███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   █████╗  ███████║██╔████╔██║
-██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ██╔══╝  ██╔══██║██║╚██╔╝██║
-██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ███████╗██║  ██║██║ ╚═╝ ██║
-╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝
+ █████╗  ██████╗ ███████╗███╗   ██╗███████╗██╗   ██╗██╗████████╗███████╗
+██╔══██╗██╔════╝ ██╔════╝████╗  ██║██╔════╝██║   ██║██║╚══██╔══╝██╔════╝
+███████║██║  ███╗█████╗  ██╔██╗ ██║███████╗██║   ██║██║   ██║   █████╗
+██╔══██║██║   ██║██╔══╝  ██║╚██╗██║╚════██║██║   ██║██║   ██║   ██╔══╝
+██║  ██║╚██████╔╝███████╗██║ ╚████║███████║╚██████╔╝██║   ██║   ███████╗
+╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝╚══════╝ ╚═════╝ ╚═╝   ╚═╝   ╚══════╝
               Agent-native C-suite orchestration
 """
 
@@ -71,7 +71,7 @@ _BANNER = """\
 def _print_banner() -> None:
     """Emit the banner on stderr so stdout stays the machine-parseable channel.
 
-    Orchestrators that pipe ``agenteam bootstrap`` output (or any future
+    Orchestrators that pipe ``agensuite bootstrap`` output (or any future
     subcommand) get a clean stdout; humans still see the banner because
     interactive shells render stderr alongside stdout.
     """
@@ -119,7 +119,7 @@ def _global(
     root: Optional[Path] = typer.Option(
         None,
         "--root",
-        envvar="AGENTEAM_ROOT",
+        envvar="AGENSUITE_ROOT",
         help="Project root containing sprints/, workspace/, state/. "
              "Defaults to the current working directory.",
     ),
@@ -127,7 +127,7 @@ def _global(
     """Set the project root for every subcommand.
 
     Threads through ``ctx.obj`` so subcommands don't each have to parse the
-    same flag. The env var fallback (``AGENTEAM_ROOT``) is what makes the
+    same flag. The env var fallback (``AGENSUITE_ROOT``) is what makes the
     CLI usable from inside spawned subagents that don't share the
     orchestrator's CWD.
     """
@@ -149,7 +149,7 @@ def _engine(ctx: typer.Context) -> GitEngine:
 
 def _resource_templates_root() -> Traversable:
     """Return the immutable templates bundled with the installed package."""
-    return resources.files("agenteam").joinpath("templates")
+    return resources.files("agensuite").joinpath("templates")
 
 
 def _copy_resource_tree(
@@ -272,7 +272,7 @@ def _rebuild_schedule(
 def init(
     target_dir: Path = typer.Argument(
         ...,
-        help="Directory to create for a new isolated agenteam project.",
+        help="Directory to create for a new isolated agensuite project.",
     ),
     idea: Optional[str] = typer.Option(
         None,
@@ -298,7 +298,7 @@ def init(
 
     templates = _resource_templates_root()
     if not templates.is_dir():
-        raise _err("packaged templates are missing; reinstall agenteam")
+        raise _err("packaged templates are missing; reinstall agensuite")
 
     try:
         target.mkdir(parents=True, exist_ok=True)
@@ -318,12 +318,12 @@ def init(
     except OSError as e:
         raise _err(f"init failed: {e}") from e
 
-    typer.echo(f"Successfully initialized agenteam project at {target}")
+    typer.echo(f"Successfully initialized agensuite project at {target}")
     typer.echo("")
     typer.echo("Next steps:")
     typer.echo(f"  cd {target}")
     typer.echo("  customize AGENTS.md, .claude/agents/, and sprints/sprint-1.md")
-    typer.echo("  agenteam bootstrap")
+    typer.echo("  agensuite bootstrap")
     typer.echo("  open this folder inside your coding agent session")
 
 
@@ -878,7 +878,7 @@ def _merge_pr(
     if pr.status == PRStatus.DEADLOCKED and not force_deadlock:
         raise _err(
             f"PR {id} is DEADLOCKED; resolve via "
-            f"'agenteam human-gate --sprint {pr.sprint_id} --resolve-deadlocks' "
+            f"'agensuite human-gate --sprint {pr.sprint_id} --resolve-deadlocks' "
             "before merging"
         )
     if pr.approval_count < cfg.approval_quorum:
@@ -1517,7 +1517,7 @@ def chief_customize(
 ) -> None:
     """Append a bias line to ``.claude/agents/<role>.md``.
 
-    Targets the project root resolved by ``--root`` / ``AGENTEAM_ROOT`` / CWD,
+    Targets the project root resolved by ``--root`` / ``AGENSUITE_ROOT`` / CWD,
     so it works without opening the file in an editor.
     """
     role_norm = role.lower()
