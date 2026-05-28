@@ -343,6 +343,25 @@ class TestInit:
         assert p.returncode == 0, p.stderr
         assert (target / "sprints" / "sprint-1.md").exists()
 
+    def test_idea_flag_applies_sprint_defaults(self, tmp_path: Path) -> None:
+        """--idea (non-TTY) writes the default sprint config, no prompts."""
+        env = _agensuite_env()
+        p = _run(
+            ["init", "defaults-app", "--idea", "A budgeting tool"],
+            cwd=tmp_path,
+            env=env,
+        )
+        assert p.returncode == 0, p.stderr
+        sprint = (tmp_path / "defaults-app" / "sprints" / "sprint-1.md").read_text()
+        import yaml as _yaml
+
+        meta = _yaml.safe_load(sprint.split("---\n", 2)[1])
+        assert meta["debate_rounds"] == 2
+        assert meta["approval_quorum"] == 2
+        assert meta["participants"] == ["cpo", "cto", "cdo", "cco"]
+        # The misleading "customize files" line is gone.
+        assert "customize AGENTS.md" not in p.stdout
+
 
 class TestChiefCustomize:
     """`agensuite chief customize <role> --focus "<text>"`."""

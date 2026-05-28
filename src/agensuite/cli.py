@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from datetime import datetime, timezone
 from importlib import resources
 from importlib.abc import Traversable
@@ -286,12 +287,6 @@ def init(
     startup idea substituted into the templated ``{{CORE_PRODUCT_IDEA}}`` and
     ``{{COMPANY_MISSION}}`` tokens.
     """
-    if idea is None:
-        idea = typer.prompt("Describe your startup idea")
-    idea = idea.strip()
-    if not idea:
-        raise _err("idea must be a non-empty string")
-
     target = _resolve_target_dir(target_dir)
     if target.exists() and not target.is_dir():
         raise _err(f"target path exists and is not a directory: {target}")
@@ -302,20 +297,55 @@ def init(
     if not templates.is_dir():
         raise _err("packaged templates are missing; reinstall agensuite")
 
+    # Resolve answers. The interactive wizard runs ONLY when no --idea flag
+    # was given AND stdin is a real TTY. Otherwise we stay non-interactive:
+    # idea comes from the flag or a piped stdin line, everything else defaults.
+    from .wizard import default_answers, run_init_wizard
+
+    if idea is None and sys.stdin.isatty():
+        answers = run_init_wizard()
+    else:
+        if idea is None:
+            idea = typer.prompt("Describe your startup idea")
+        idea = idea.strip()
+        if not idea:
+            raise _err("idea must be a non-empty string")
+        answers = default_answers(idea)
+
     try:
         target.mkdir(parents=True, exist_ok=True)
         _copy_resource_tree(
-            templates.joinpath("AGENTS.md"), target / "AGENTS.md", idea=idea
+            templates.joinpath("AGENTS.md"), target / "AGENTS.md", idea=answers.idea
         )
         _copy_resource_tree(
             templates.joinpath(".claude", "agents"),
             target / ".claude" / "agents",
-            idea=idea,
+            idea=answers.idea,
         )
         _copy_resource_tree(
             templates.joinpath("sprints", "sprint-1.md"),
             target / "sprints" / "sprint-1.md",
-            idea=idea,
+            idea=answers.idea,
+        )
+
+        # Apply per-persona biases.
+        for role, lines in answers.biases.items():
+            agent_file = target / ".claude" / "agents" / f"{role}.md"
+            text = agent_file.read_text(encoding="utf-8")
+            for line in lines:
+                text = _append_operational_bias(text, line)
+            agent_file.write_text(text, encoding="utf-8")
+
+        # Apply sprint-1 config.
+        sprint_file = target / "sprints" / "sprint-1.md"
+        sprint_file.write_text(
+            _set_sprint_frontmatter(
+                sprint_file.read_text(encoding="utf-8"),
+                rounds=answers.debate_rounds,
+                quorum=answers.approval_quorum,
+                participants=answers.participants,
+            ),
+            encoding="utf-8",
         )
     except OSError as e:
         raise _err(f"init failed: {e}") from e
@@ -324,7 +354,6 @@ def init(
     typer.echo("")
     typer.echo("Next steps:")
     typer.echo(f"  cd {target}")
-    typer.echo("  customize AGENTS.md, .claude/agents/, and sprints/sprint-1.md")
     typer.echo("  agensuite bootstrap")
     typer.echo("  open this folder inside your coding agent session")
 
