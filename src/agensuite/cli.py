@@ -24,6 +24,8 @@ from importlib.abc import Traversable
 from pathlib import Path
 from typing import Optional
 
+import yaml
+
 import typer
 
 from .git_engine import GitCommandError, GitEngine, MergeConflict
@@ -1473,6 +1475,39 @@ def _substitute_tokens(text: str, idea: str) -> str:
         text.replace("{{COMPANY_MISSION}}", idea)
             .replace("{{CORE_PRODUCT_IDEA}}", idea)
     )
+
+
+def _set_sprint_frontmatter(
+    content: str,
+    *,
+    rounds: int,
+    quorum: int,
+    participants: list[str],
+) -> str:
+    """Rewrite the YAML frontmatter of a sprint file, preserving its body.
+
+    Updates ``debate_rounds`` / ``approval_quorum`` / ``participants`` and
+    leaves every other frontmatter key and the markdown body untouched.
+    Validates ``rounds >= 1`` and ``1 <= quorum <= len(participants)``.
+    """
+    if rounds < 1:
+        raise ValueError("rounds must be >= 1")
+    if not (1 <= quorum <= len(participants)):
+        raise ValueError(
+            "quorum must satisfy 1 <= quorum <= number of participants"
+        )
+
+    if not content.startswith("---\n"):
+        raise ValueError("sprint file has no YAML frontmatter")
+    _, front, body = content.split("---\n", 2)
+
+    meta = yaml.safe_load(front) or {}
+    meta["debate_rounds"] = rounds
+    meta["approval_quorum"] = quorum
+    meta["participants"] = participants
+
+    new_front = yaml.safe_dump(meta, sort_keys=False, default_flow_style=None)
+    return f"---\n{new_front}---\n{body}"
 
 
 def _append_operational_bias(content: str, focus: str) -> str:
