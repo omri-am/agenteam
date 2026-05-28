@@ -67,6 +67,8 @@ def _ask_biases() -> dict[str, list[str]]:
             f"Tune the {role.upper()} ({PERSONA_BLURBS[role]})?",
             default=False,
         ).ask()
+        if tune is None:
+            raise SystemExit("setup cancelled")
         if not tune:
             continue
         lines: list[str] = []
@@ -94,15 +96,18 @@ def _ask_sprint() -> tuple[int, int, list[str]]:
             ).ask()
         )
     )
-    participants = questionary.checkbox(
+    _picked = questionary.checkbox(
         "Sprint-1 participants:",
         choices=[questionary.Choice(s.upper(), value=s, checked=True) for s in SPOKES],
-    ).ask() or list(SPOKES)
+    ).ask()
+    if _picked is None:
+        raise SystemExit("setup cancelled")
+    participants = _picked or list(SPOKES)
     quorum = int(
         _required(
             questionary.text(
                 f"Approval quorum (1..{len(participants)}):",
-                default="2",
+                default=str(min(2, len(participants))),
                 validate=lambda v, n=len(participants): v.isdigit() and 1 <= int(v) <= n,
             ).ask()
         )
@@ -120,6 +125,17 @@ def run_init_wizard() -> InitAnswers:
 
     questionary.print("Step 3/3 · Sprint 1 config", style="bold")
     rounds, quorum, participants = _ask_sprint()
+
+    questionary.print("Review", style="bold")
+    questionary.print(f"  idea:         {idea}")
+    if biases:
+        for _role, _lines in biases.items():
+            questionary.print(f"  {_role} bias:  {'; '.join(_lines)}")
+    else:
+        questionary.print("  biases:       (none)")
+    questionary.print(f"  sprint-1:     rounds={rounds} quorum={quorum} participants={participants}")
+    if not questionary.confirm("Create the project with these settings?", default=True).ask():
+        raise SystemExit("setup cancelled")
 
     return InitAnswers(
         idea=idea,

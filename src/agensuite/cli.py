@@ -280,7 +280,7 @@ def init(
     idea: Optional[str] = typer.Option(
         None,
         "--idea",
-        help="Startup idea / company mission. If omitted, the CLI prompts.",
+        help="Startup idea / company mission. If omitted on a TTY, the guided setup wizard launches; otherwise read from stdin.",
     ),
 ) -> None:
     """Scaffold a clean project from packaged blueprints, with the user-provided

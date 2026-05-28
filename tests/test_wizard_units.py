@@ -83,3 +83,16 @@ def test_default_answers_uses_idea_and_defaults() -> None:
     assert a.biases == {}
     assert a.debate_rounds == 2
     assert a.participants == ["cpo", "cto", "cdo", "cco"]
+
+
+def test_append_operational_bias_multiple_lines_in_order() -> None:
+    from agensuite.cli import _append_operational_bias
+
+    doc = (
+        "---\nname: cto\n---\n"
+        "# CTO\n\n## Operational Biases\n- baseline bias\n\n## Next Section\nbody\n"
+    )
+    for line in ["first added", "second added"]:
+        doc = _append_operational_bias(doc, line)
+    biases_block = doc.split("## Operational Biases", 1)[1].split("## Next Section", 1)[0]
+    assert biases_block.index("baseline bias") < biases_block.index("first added") < biases_block.index("second added")
