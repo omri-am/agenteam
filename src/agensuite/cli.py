@@ -25,9 +25,8 @@ from importlib.abc import Traversable
 from pathlib import Path
 from typing import Optional
 
-import yaml
-
 import typer
+import yaml
 
 from .git_engine import GitCommandError, GitEngine, MergeConflict
 from .models import (

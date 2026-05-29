@@ -96,3 +96,51 @@ def test_append_operational_bias_multiple_lines_in_order() -> None:
         doc = _append_operational_bias(doc, line)
     biases_block = doc.split("## Operational Biases", 1)[1].split("## Next Section", 1)[0]
     assert biases_block.index("baseline bias") < biases_block.index("first added") < biases_block.index("second added")
+
+
+def test_init_applies_wizard_biases_and_sprint_config(tmp_path, monkeypatch) -> None:
+    """The interactive (TTY) path applies biases + non-default sprint config.
+
+    Drives the real ``init`` apply logic with a crafted InitAnswers, bypassing
+    the live questionary prompts (which a non-TTY test cannot exercise).
+
+    ``init`` is invoked as a plain function rather than through Typer's
+    CliRunner: the runner swaps ``sys.stdin`` for its own non-TTY stream during
+    invocation, which would defeat the ``isatty`` patch and send ``init`` down
+    the non-interactive branch.
+    """
+    from agensuite import cli, wizard
+
+    crafted = wizard.InitAnswers(
+        idea="A budgeting tool",
+        biases={"cto": ["prefer boring tech", "cap latency budgets"]},
+        debate_rounds=3,
+        approval_quorum=1,
+        participants=["cpo", "cto"],
+    )
+    monkeypatch.setattr(wizard, "run_init_wizard", lambda: crafted)
+
+    class _Tty:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(cli.sys, "stdin", _Tty())
+
+    target = tmp_path / "proj"
+    cli.init(target_dir=target, idea=None)
+
+    # Biases appended to the CTO persona, in order, and only there.
+    cto = (target / ".claude" / "agents" / "cto.md").read_text()
+    assert "- prefer boring tech" in cto
+    assert "- cap latency budgets" in cto
+    assert cto.index("prefer boring tech") < cto.index("cap latency budgets")
+    cpo = (target / ".claude" / "agents" / "cpo.md").read_text()
+    assert "prefer boring tech" not in cpo
+
+    # Non-default sprint config written; idea substituted.
+    sprint = (target / "sprints" / "sprint-1.md").read_text()
+    meta = yaml.safe_load(sprint.split("---\n", 2)[1])
+    assert meta["debate_rounds"] == 3
+    assert meta["approval_quorum"] == 1
+    assert meta["participants"] == ["cpo", "cto"]
+    assert "A budgeting tool" in sprint
