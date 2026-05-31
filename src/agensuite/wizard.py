@@ -77,7 +77,10 @@ def _ask_biases() -> dict[str, list[str]]:
             style="fg:cyan",
         )
         while True:
-            line = (questionary.text(f"  {role.upper()} bias:").ask() or "").strip()
+            answer = questionary.text(f"  {role.upper()} bias:").ask()
+            if answer is None:
+                raise SystemExit("setup cancelled")
+            line = answer.strip()
             if not line:
                 break
             lines.append(line)
