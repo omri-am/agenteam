@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from datetime import datetime, timezone
 from importlib import resources
 from importlib.abc import Traversable
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+import yaml
 
 from .git_engine import GitCommandError, GitEngine, MergeConflict
 from .models import (
@@ -277,19 +279,13 @@ def init(
     idea: Optional[str] = typer.Option(
         None,
         "--idea",
-        help="Startup idea / company mission. If omitted, the CLI prompts.",
+        help="Startup idea / company mission. If omitted on a TTY, the guided setup wizard launches; otherwise read from stdin.",
     ),
 ) -> None:
     """Scaffold a clean project from packaged blueprints, with the user-provided
     startup idea substituted into the templated ``{{CORE_PRODUCT_IDEA}}`` and
     ``{{COMPANY_MISSION}}`` tokens.
     """
-    if idea is None:
-        idea = typer.prompt("Describe your startup idea")
-    idea = idea.strip()
-    if not idea:
-        raise _err("idea must be a non-empty string")
-
     target = _resolve_target_dir(target_dir)
     if target.exists() and not target.is_dir():
         raise _err(f"target path exists and is not a directory: {target}")
@@ -300,29 +296,63 @@ def init(
     if not templates.is_dir():
         raise _err("packaged templates are missing; reinstall agensuite")
 
+    # Resolve answers. The interactive wizard runs ONLY when no --idea flag
+    # was given AND stdin is a real TTY. Otherwise we stay non-interactive:
+    # idea comes from the flag or a piped stdin line, everything else defaults.
+    from .wizard import default_answers, run_init_wizard
+
+    if idea is None and sys.stdin.isatty():
+        answers = run_init_wizard()
+    else:
+        if idea is None:
+            idea = typer.prompt("Describe your startup idea")
+        idea = idea.strip()
+        if not idea:
+            raise _err("idea must be a non-empty string")
+        answers = default_answers(idea)
+
     try:
         target.mkdir(parents=True, exist_ok=True)
         _copy_resource_tree(
-            templates.joinpath("AGENTS.md"), target / "AGENTS.md", idea=idea
+            templates.joinpath("AGENTS.md"), target / "AGENTS.md", idea=answers.idea
         )
         _copy_resource_tree(
             templates.joinpath(".claude", "agents"),
             target / ".claude" / "agents",
-            idea=idea,
+            idea=answers.idea,
         )
         _copy_resource_tree(
             templates.joinpath("sprints", "sprint-1.md"),
             target / "sprints" / "sprint-1.md",
-            idea=idea,
+            idea=answers.idea,
         )
-    except OSError as e:
+
+        # Apply per-persona biases.
+        for role, lines in answers.biases.items():
+            agent_file = target / ".claude" / "agents" / f"{role}.md"
+            text = agent_file.read_text(encoding="utf-8")
+            for line in lines:
+                text = _append_operational_bias(text, line)
+            agent_file.write_text(text, encoding="utf-8")
+
+        # Apply sprint-1 config.
+        sprint_file = target / "sprints" / "sprint-1.md"
+        sprint_file.write_text(
+            _set_sprint_frontmatter(
+                sprint_file.read_text(encoding="utf-8"),
+                rounds=answers.debate_rounds,
+                quorum=answers.approval_quorum,
+                participants=answers.participants,
+            ),
+            encoding="utf-8",
+        )
+    except (OSError, ValueError) as e:
         raise _err(f"init failed: {e}") from e
 
     typer.echo(f"Successfully initialized agensuite project at {target}")
     typer.echo("")
     typer.echo("Next steps:")
     typer.echo(f"  cd {target}")
-    typer.echo("  customize AGENTS.md, .claude/agents/, and sprints/sprint-1.md")
     typer.echo("  agensuite bootstrap")
     typer.echo("  open this folder inside your coding agent session")
 
@@ -1473,6 +1503,42 @@ def _substitute_tokens(text: str, idea: str) -> str:
         text.replace("{{COMPANY_MISSION}}", idea)
             .replace("{{CORE_PRODUCT_IDEA}}", idea)
     )
+
+
+def _set_sprint_frontmatter(
+    content: str,
+    *,
+    rounds: int,
+    quorum: int,
+    participants: list[str],
+) -> str:
+    """Rewrite the YAML frontmatter of a sprint file, preserving its body.
+
+    Updates ``debate_rounds`` / ``approval_quorum`` / ``participants`` and
+    leaves every other frontmatter key and the markdown body untouched.
+    Validates ``rounds >= 1`` and ``1 <= quorum <= len(participants)``.
+    """
+    if rounds < 1:
+        raise ValueError("rounds must be >= 1")
+    if not (1 <= quorum <= len(participants)):
+        raise ValueError(
+            "quorum must satisfy 1 <= quorum <= number of participants"
+        )
+
+    if not content.startswith("---\n"):
+        raise ValueError("sprint file has no YAML frontmatter")
+    parts = content.split("---\n", 2)
+    if len(parts) < 3:
+        raise ValueError("sprint file frontmatter is not closed (missing closing '---')")
+    _, front, body = parts
+
+    meta = yaml.safe_load(front) or {}
+    meta["debate_rounds"] = rounds
+    meta["approval_quorum"] = quorum
+    meta["participants"] = participants
+
+    new_front = yaml.safe_dump(meta, sort_keys=False, default_flow_style=None)
+    return f"---\n{new_front}---\n{body}"
 
 
 def _append_operational_bias(content: str, focus: str) -> str:

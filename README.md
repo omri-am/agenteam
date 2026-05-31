@@ -70,11 +70,13 @@ uv tool install agensuite
 > `uvx` is *ephemeral* — the binary disappears after the command, so you'd
 > have to prefix every later `agensuite` call the same way. The persistent
 > install above is simpler because the workflow runs many `agensuite`
-> commands.
+> commands. Omitting `--idea` on a terminal launches the guided setup wizard.
 
 **2. Scaffold your project** (substitutes your idea into every template):
 
 ```bash
+agensuite init my-startup        # guided setup wizard (idea, persona biases, sprint config)
+# non-interactive alternative:
 agensuite init my-startup --idea "A marketplace for renting camera gear between creators"
 cd my-startup
 ```
